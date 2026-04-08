@@ -2590,7 +2590,7 @@ public:
         this->host_alignment_ = tt_metal::MetalContext::instance().hal().get_alignment(tt_metal::HalMemType::HOST);
         // Cap inline command size to avoid cmddat_q L1 overflow on the prefetch-d core.
         this->max_fetch_bytes_ =
-            tt_metal::MetalContext::instance().dispatch_mem_map(CoreType::WORKER).scratch_db_size();
+            tt_metal::MetalContext::instance().dispatch_mem_map().scratch_db_size();
 
         this->dram_base_ = this->device_->allocator_impl()->get_base_allocator_addr(HalMemType::DRAM);
         this->num_banks_ = this->device_->allocator_impl()->get_num_banks(BufferType::DRAM);
@@ -2622,7 +2622,7 @@ public:
         uint32_t num_iterations,
         bool /*wait_for_completion*/ = true,
         bool /*wait_for_host_writes*/ = false) override {
-        const auto& memmap = tt_metal::MetalContext::instance().dispatch_mem_map(CoreType::WORKER);
+        const auto& memmap = tt_metal::MetalContext::instance().dispatch_mem_map();
         const uint32_t entry_size = memmap.prefetch_q_entry_size_bytes();
         TT_FATAL(entry_size == 4, "Entry size must be 32 bits for worker cores used to launch prefetcher in this test");
         const uint32_t dispatch_cb_base = memmap.dispatch_buffer_base();
@@ -2869,7 +2869,7 @@ public:
     // we set up ourselves (dev_hugepage_base + SD_HUGEPAGE_ISSUE_BUFFER_SIZE), not to a
     // runtime-managed FDMeshCommandQueue completion queue.
     void* get_completion_queue_buffer() override {
-        const auto& memmap = tt_metal::MetalContext::instance().dispatch_mem_map(CoreType::WORKER);
+        const auto& memmap = tt_metal::MetalContext::instance().dispatch_mem_map();
         const uint32_t dev_hugepage_base = memmap.get_host_command_queue_addr(CommandQueueHostAddrType::UNRESERVED);
         const ChipId mmio_id =
             tt_metal::MetalContext::instance().get_cluster().get_associated_mmio_device(device_->id());
