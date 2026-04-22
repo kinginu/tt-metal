@@ -539,17 +539,34 @@ def comp_pcc(golden, calculated, pcc=0.99):
     if golden.dtype == torch.bfloat16:
         golden = golden.type(torch.float32)
         calculated = calculated.type(torch.float32)
-    cal_pcc = np.min(
-        np.ma.corrcoef(
-            np.ma.masked_invalid(torch.squeeze(golden).detach().numpy()).flatten(),
-            np.ma.masked_invalid(torch.squeeze(calculated).detach().numpy()).flatten(),
+
+    # If either tensor is constant, PCC is mathematically undefined (zero std dev).
+    # Fall back to allclose rather than returning a misleading 1.0. Also covers single-element
+    # tensors, where max == min trivially.
+    if torch.max(golden) == torch.min(golden) or torch.max(calculated) == torch.min(calculated):
+        logger.warning(
+            "One or both tensors are constant (zero standard deviation). "
+            "PCC is undefined. Falling back to allclose check."
         )
+        result = torch.allclose(golden, calculated, rtol=1e-05, atol=1e-08)
+        return result, float(result)
+
+    cal_pcc = np.ma.corrcoef(
+        np.ma.masked_invalid(torch.squeeze(golden).detach().numpy()).flatten(),
+        np.ma.masked_invalid(torch.squeeze(calculated).detach().numpy()).flatten(),
     )
+    # Read off-diagonal directly instead of np.min to avoid diagonal contamination.
+    cal_pcc = cal_pcc[0, 1]
 
-    if isinstance(cal_pcc, np.ma.core.MaskedConstant):
-        return True, 1.0
+    # Defensive: corrcoef can still return MaskedConstant or NaN if the masked arrays
+    # collapse to identical values after invalid-element removal (e.g. mixed NaN/inf inputs
+    # not fully filtered above). Fall back to allclose rather than crashing or returning 1.0.
+    if isinstance(cal_pcc, np.ma.core.MaskedConstant) or np.isnan(float(cal_pcc)):
+        logger.warning("PCC returned NaN/masked. Falling back to allclose check.")
+        result = torch.allclose(golden, calculated, rtol=1e-05, atol=1e-08)
+        return result, float(result)
 
-    return cal_pcc >= pcc, cal_pcc
+    return cal_pcc >= pcc, float(cal_pcc)
 
 
 def ulp(x: Union[ttnn.Tensor, torch.Tensor]) -> Union[ttnn.Tensor, torch.Tensor]:
