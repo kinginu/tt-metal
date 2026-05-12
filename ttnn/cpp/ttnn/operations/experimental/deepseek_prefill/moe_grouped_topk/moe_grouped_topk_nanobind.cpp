@@ -4,6 +4,7 @@
 
 #include "moe_grouped_topk_nanobind.hpp"
 
+#include <cstdint>
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/optional.h>
 #include <nanobind/stl/array.h>
@@ -29,6 +30,8 @@ void bind_moe_grouped_topk(nb::module_& mod) {
                 epsilon (float): Epsilon for numerical stability when normalizing the scores.
                 stable_sort (bool): Use stable sorting in topk to maintain relative order of equal-valued elements. Defaults to False.
                 memory_config (ttnn.MemoryConfig, optional): Memory configuration for the output tensor. Defaults to None, which results in auto-selection.
+                num_real_tokens (int): Number of real (non-padded) tokens. Padded token rows get sentinel expert indices. Defaults to UINT32_MAX (all tokens are real).
+                pad_side (int): Padding side: 0 = right-padded, 1 = left-padded. Defaults to 0.
 
             Returns:
                 Tuple[ttnn.Tensor, ttnn.Tensor]: A tuple containing the scaled expert scores (dtype BFLOAT16) and selected expert indices (dtype UINT16). The shape of the scores tensor should be [N, B, S, 8]. The shape of the indices tensor should be [N, B, S, 8]. N, B and S can be any value. 8 is the number of experts in the final selected groups.
@@ -44,7 +47,9 @@ void bind_moe_grouped_topk(nb::module_& mod) {
         nb::arg("route_scale") = 1.0f,
         nb::arg("epsilon") = 1e-20f,
         nb::arg("stable_sort") = false,
-        nb::arg("memory_config") = nb::none());
+        nb::arg("memory_config") = nb::none(),
+        nb::arg("num_real_tokens") = UINT32_MAX,
+        nb::arg("pad_side") = 0);
 }
 
 }  // namespace ttnn::operations::experimental::deepseek_prefill::moe_grouped_topk::detail

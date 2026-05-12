@@ -17,7 +17,9 @@ std::array<Tensor, 2> moe_grouped_topk(
     float route_scale,
     float epsilon,
     bool stable_sort,
-    const std::optional<MemoryConfig>& output_mem_config) {
+    const std::optional<MemoryConfig>& output_mem_config,
+    uint32_t num_real_tokens,
+    uint32_t pad_side) {
     return ttnn::prim::moe_grouped_topk(
         scores,
         bias,
@@ -28,7 +30,9 @@ std::array<Tensor, 2> moe_grouped_topk(
         route_scale,
         epsilon,
         stable_sort,
-        output_mem_config);
+        output_mem_config,
+        num_real_tokens,
+        pad_side);
 }
 
 }  // namespace ttnn::operations::experimental::deepseek_prefill::moe_grouped_topk

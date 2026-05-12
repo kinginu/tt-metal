@@ -211,8 +211,10 @@ class ExpertMapping:
             num_dispatch_groups: Number of parallel dispatch groups
 
         Returns:
-            expert_dispatch_table: Shape (num_dispatch_groups, num_routed_experts)
-                Values are logical chip IDs (0 to dispatch_group_size-1) or -1 if not present
+            expert_dispatch_table: Shape (num_dispatch_groups, num_routed_experts + 1)
+                Values are logical chip IDs (0 to dispatch_group_size-1) or -1 if not present.
+                The last column (index num_routed_experts) is a sentinel slot, always -1,
+                used to safely handle padded tokens whose indices are set to num_routed_experts.
 
         Example:
             # num_chips=8, dispatch_group_size=4, num_dispatch_groups=2, num_routed_experts=16
@@ -220,15 +222,18 @@ class ExpertMapping:
             # Group 0 handles experts 0-7, Group 1 handles experts 8-15
             # chip_id = local_expert_id // 2 (local within each group)
             expert_dispatch_table = [
-                [ 0, 0, 1, 1,  2, 2, 3, 3, -1,-1,-1,-1, -1,-1,-1,-1], # group 0: experts 0-7 -> chips 0-3
-                [-1,-1,-1,-1, -1,-1,-1,-1,  0, 0, 1, 1,  2, 2, 3, 3], # group 1: experts 8-15 -> chips 0-3
+                [ 0, 0, 1, 1,  2, 2, 3, 3, -1,-1,-1,-1, -1,-1,-1,-1, -1], # group 0 + sentinel
+                [-1,-1,-1,-1, -1,-1,-1,-1,  0, 0, 1, 1,  2, 2, 3, 3, -1], # group 1 + sentinel
             ]
         """
         # Each dispatch group handles a subset of experts, distributed across chips
         experts_per_group = num_routed_experts // num_dispatch_groups
         experts_per_chip = experts_per_group // dispatch_group_size  # Experts per chip within each group
 
-        table = torch.full((num_dispatch_groups, num_routed_experts), -1, dtype=torch.int32)
+        # +1 column for the sentinel slot (index num_routed_experts), always -1.
+        # Dispatch kernel indexes expert_dispatch_table[routed_expert]; for padded tokens
+        # whose indices are set to num_routed_experts, this returns -1 -> skip.
+        table = torch.full((num_dispatch_groups, num_routed_experts + 1), -1, dtype=torch.int32)
         for group in range(num_dispatch_groups):
             group_start = group * experts_per_group
             group_end = group_start + experts_per_group

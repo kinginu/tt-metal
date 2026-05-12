@@ -127,3 +127,96 @@ def test_moe_grouped_topk(device, num_batches, batch_size, seq_len):
         f"Weights PCC is {weights_pcc:.4f}, expected >= {pcc_threshold} "
         f"for num_batches={num_batches}, batch_size={batch_size}, seq_len={seq_len}"
     )
+
+
+SENTINEL_PARAMS = [
+    # (seq_len, num_real_tokens, pad_side, id)
+    (128, 100, 0, "right_pad_boundary"),
+    (128, 100, 1, "left_pad_boundary"),
+    (128, 64, 0, "right_pad_half"),
+    (128, 1, 0, "right_pad_almost_all"),
+    (128, 128, 0, "right_pad_none"),
+    (33, 17, 0, "right_pad_non_tile_aligned"),
+    (33, 17, 1, "left_pad_non_tile_aligned"),
+]
+
+
+@pytest.mark.parametrize(
+    "seq_len,num_real_tokens,pad_side",
+    [(s, n, p) for s, n, p, _ in SENTINEL_PARAMS],
+    ids=[i for _, _, _, i in SENTINEL_PARAMS],
+)
+def test_moe_grouped_topk_sentinel(device, seq_len, num_real_tokens, pad_side):
+    """Verify that padded token rows get sentinel indices while real rows are bit-exact to baseline."""
+    torch.manual_seed(42)
+
+    total_experts = 256
+    n_groups = 8
+    summed_experts_per_group = 2
+    topk_groups = 4
+    n_activated_experts = 8
+    epsilon = 1e-20
+    route_scale = 0.5
+    sentinel = total_experts
+
+    scores = generate_distinct_sigmoid_inputs((1, 1, seq_len, total_experts), dtype=torch.float32)
+    bias = torch.randn(1, 1, seq_len, total_experts, dtype=torch.float32)
+
+    ttnn_scores_in = ttnn.from_torch(scores, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=device)
+    ttnn_bias_in = ttnn.from_torch(bias, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=device)
+
+    # Baseline: no padding
+    _, baseline_indices_out = ttnn.experimental.deepseek_prefill.moe_grouped_topk(
+        ttnn_scores_in,
+        ttnn_bias_in,
+        n_groups=n_groups,
+        summed_experts_per_group=summed_experts_per_group,
+        topk_groups=topk_groups,
+        n_activated_experts=n_activated_experts,
+        route_scale=route_scale,
+        epsilon=epsilon,
+    )
+    baseline_indices = ttnn.to_torch(baseline_indices_out)[:1, :1, :seq_len, :n_activated_experts]
+
+    # With padding sentinel
+    _, padded_indices_out = ttnn.experimental.deepseek_prefill.moe_grouped_topk(
+        ttnn_scores_in,
+        ttnn_bias_in,
+        n_groups=n_groups,
+        summed_experts_per_group=summed_experts_per_group,
+        topk_groups=topk_groups,
+        n_activated_experts=n_activated_experts,
+        route_scale=route_scale,
+        epsilon=epsilon,
+        num_real_tokens=num_real_tokens,
+        pad_side=pad_side,
+    )
+    padded_indices = ttnn.to_torch(padded_indices_out)[:1, :1, :seq_len, :n_activated_experts]
+
+    # Determine which rows are real vs padded
+    if pad_side == 0:  # right-pad
+        real_mask = torch.arange(seq_len) < num_real_tokens
+    else:  # left-pad
+        real_mask = torch.arange(seq_len) >= (seq_len - num_real_tokens)
+
+    real_indices = padded_indices[0, 0, real_mask]
+    padded_row_indices = padded_indices[0, 0, ~real_mask]
+    baseline_real = baseline_indices[0, 0, real_mask]
+
+    # Real rows must be bit-exact to baseline
+    if real_mask.any():
+        assert torch.equal(real_indices, baseline_real), (
+            f"Real-row indices differ from baseline!\n"
+            f"  Mismatched rows: {(real_indices != baseline_real).any(dim=-1).nonzero().flatten().tolist()}"
+        )
+        logger.info(f"Real-row indices: bit-exact match ({real_mask.sum().item()} rows)")
+
+    # Padded rows must all be sentinel
+    if (~real_mask).any():
+        expected = torch.full_like(padded_row_indices, sentinel, dtype=padded_row_indices.dtype)
+        assert torch.equal(padded_row_indices, expected), (
+            f"Padded-row indices are not all sentinel ({sentinel})!\n"
+            f"  Got: {padded_row_indices}\n"
+            f"  Expected: all {sentinel}"
+        )
+        logger.info(f"Padded-row indices: all sentinel ({(~real_mask).sum().item()} rows)")

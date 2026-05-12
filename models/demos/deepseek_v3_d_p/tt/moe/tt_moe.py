@@ -401,6 +401,8 @@ class TtMoe(LightweightModule):
         self,
         x: ttnn.Tensor,
         return_intermediates: bool = False,
+        actual_isl: int = None,
+        padding_side: str = "right",
     ) -> tuple[ttnn.Tensor, Optional[TtMoEIntermediates]]:
         """
         Forward pass through the full MoE pipeline.
@@ -410,7 +412,8 @@ class TtMoe(LightweightModule):
                - For 2D mesh: sharded dims=(0, -1) - dim 0 across axis 0, dim -1 across axis 1
                - Shape per device: (dispatch_group_size/axis0, seq_len_per_chip, emb_dim/axis1)
             return_intermediates: If True, return intermediate tensors for debugging
-
+            actual_isl: Actual ISL of the sequence (None = no padding)
+            padding_side: Padding side of the sequence
         Returns:
             Tuple of (final_output, intermediates):
             - final_output: MoE output with same sharding as input
@@ -425,15 +428,18 @@ class TtMoe(LightweightModule):
         # ========================================
         # Reshape 3D -> 2D for gate: (batch, seq, emb) -> (batch*seq, emb)
 
-        scores, indices, gate_logits = self.gate(ttnn.view(x, (x.shape[0] * x.shape[1], x.shape[2])))
-
+        scores, indices, gate_logits = self.gate(
+            ttnn.view(x, (x.shape[0] * x.shape[1], x.shape[2])),
+            num_real_tokens=actual_isl,
+            padding_side=padding_side,
+        )
         signpost(header="moe_gate_calculate_dispatch_offsets")
         tt_expert_offsets, tt_expert_token_counts, tt_expert_region_offsets, _ = self.routing_setup(
             ttnn_top_k_experts_indices=indices,
             num_routed_experts=self.num_routed_experts,
             seq_len_per_chip=self.seq_len_per_chip,
             num_experts_per_tok=self.num_experts_per_tok,
-        )
+
         signpost(header="moe_gate_calculate_dispatch_offsets")
         gate_logits = (
             ttnn.to_memory_config(gate_logits, ttnn.DRAM_MEMORY_CONFIG)

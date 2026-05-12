@@ -324,7 +324,12 @@ MoeGroupedTopkDeviceOperation::ProgramFactory::cached_program_t MoeGroupedTopkDe
     std::vector<uint32_t> reader_runtime_args = {scores.buffer()->address(), bias.buffer()->address(), 0, 0};
     std::vector<uint32_t> compute_runtime_args = {0, 0};
     std::vector<uint32_t> writer_runtime_args = {
-        output_weights.buffer()->address(), output_indices.buffer()->address(), 0, 0};
+        output_weights.buffer()->address(),
+        output_indices.buffer()->address(),
+        0,
+        0,
+        operation_attributes.num_real_tokens,
+        operation_attributes.pad_side};
 
     uint32_t start_height_tile = 0;
     uint32_t end_height_tile = 0;
@@ -360,7 +365,7 @@ MoeGroupedTopkDeviceOperation::ProgramFactory::cached_program_t MoeGroupedTopkDe
 
 void MoeGroupedTopkDeviceOperation::ProgramFactory::override_runtime_arguments(
     cached_program_t& cached_program,
-    const operation_attributes_t& /*operation_attributes*/,
+    const operation_attributes_t& operation_attributes,
     const tensor_args_t& tensor_args,
     tensor_return_value_t& tensor_return_value) {
     auto& program = cached_program.program;
@@ -374,6 +379,8 @@ void MoeGroupedTopkDeviceOperation::ProgramFactory::override_runtime_arguments(
         auto& writer_runtime_args = tt::tt_metal::GetRuntimeArgs(program, writer_kernel_id, core);
         writer_runtime_args[0] = tensor_return_value[0].buffer()->address();
         writer_runtime_args[1] = tensor_return_value[1].buffer()->address();
+        writer_runtime_args[4] = operation_attributes.num_real_tokens;
+        writer_runtime_args[5] = operation_attributes.pad_side;
     }
 }
 

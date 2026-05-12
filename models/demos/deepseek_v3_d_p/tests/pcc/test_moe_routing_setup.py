@@ -301,3 +301,130 @@ def test_prep_dispatch_combine(
 
     for r in [replication_result, region_replication_result, offsets_result, counts_result, region_offsets_result]:
         r.assert_passed(f"{r.name} validation failed")
+
+
+@pytest.mark.parametrize(
+    "seq_len_per_chip, emb_dim, num_routed_experts, num_experts_per_tok, dispatch_buffer_capacity_factor",
+    [
+        (3200, 7168, 64, 2, 2),
+    ],
+)
+@pytest.mark.parametrize(
+    "mesh_device, device_params, num_links, topology",
+    [
+        pytest.param(
+            (4, 1),
+            {
+                "fabric_config": ttnn.FabricConfig.FABRIC_1D,
+                "fabric_router_config": create_fabric_router_config(max_payload_size=7 * 1024),
+            },
+            1,
+            ttnn.Topology.Linear,
+            marks=pytest.mark.requires_mesh_topology(mesh_shape=(4, 1), topology="linear"),
+            id="linear-4",
+        ),
+    ],
+    indirect=["mesh_device", "device_params"],
+)
+@pytest.mark.parametrize("num_padded_rows", [100, 1600, 3199], ids=["few_padded", "half_padded", "nearly_all_padded"])
+def test_routing_setup_with_sentinel(
+    mesh_device,
+    seq_len_per_chip,
+    emb_dim,
+    num_routed_experts,
+    num_experts_per_tok,
+    dispatch_buffer_capacity_factor,
+    num_links,
+    topology,
+    num_padded_rows,
+):
+    """
+    Verify that sentinel-indexed token rows are excluded from routing counts.
+
+    Constructs indices where the last `num_padded_rows` are set to SENTINEL
+    (= num_routed_experts). After running TtMoERoutingSetup, asserts that
+    total token counts equal only the real (non-padded) tokens.
+    """
+    torch.manual_seed(42)
+    sentinel = num_routed_experts
+
+    mesh_config = extract_mesh_config(mesh_device)
+    sp_axis = mesh_config.sp_axis
+    dispatch_group_size = mesh_config.dispatch_group_size
+    num_dispatch_groups = mesh_config.num_dispatch_groups
+
+    (
+        experts_per_chip,
+        _metadata_len,
+        _max_dispatch_buffer_token_size,
+        max_dispatched_tokens_per_expert,
+    ) = compute_constants(
+        seq_len_per_chip,
+        num_routed_experts,
+        num_experts_per_tok,
+        mesh_device.get_num_devices(),
+        dispatch_group_size,
+        dispatch_buffer_capacity_factor,
+    )
+
+    _x, _weights, indices = initialize_test_inputs(
+        dispatch_group_size=dispatch_group_size,
+        seq_len_per_chip=seq_len_per_chip,
+        emb_dim=emb_dim,
+        num_routed_experts=num_routed_experts,
+        num_experts_per_tok=num_experts_per_tok,
+        max_dispatched_tokens_per_expert=max_dispatched_tokens_per_expert,
+        num_dispatch_groups=num_dispatch_groups,
+    )
+
+    # Overwrite the last `num_padded_rows` with SENTINEL on every device shard
+    indices[:, -num_padded_rows:, :] = sentinel
+
+    expert_dispatch_table = ExpertMapping.create_dispatch_table(
+        num_routed_experts=num_routed_experts,
+        dispatch_group_size=dispatch_group_size,
+        num_dispatch_groups=num_dispatch_groups,
+    )
+
+    mesh_mapper = ttnn.ShardTensor2dMesh(mesh_device, mesh_shape=mesh_device.shape, dims=(sp_axis, None))
+    tt_indices = ttnn.from_torch(
+        indices, mesh_mapper=mesh_mapper, layout=ttnn.ROW_MAJOR_LAYOUT, device=mesh_device, dtype=ttnn.uint16
+    )
+
+    routing_setup = TtMoERoutingSetup(
+        mesh_device=mesh_device,
+        expert_dispatch_table=expert_dispatch_table,
+        num_links=num_links,
+        experts_per_chip=experts_per_chip,
+    )
+
+    (
+        _tt_expert_offsets,
+        tt_expert_token_counts,
+        _tt_expert_region_offsets,
+        _tt_per_device_expert_counter,
+    ) = routing_setup(
+        ttnn_top_k_experts_indices=tt_indices,
+        num_routed_experts=num_routed_experts,
+        seq_len_per_chip=seq_len_per_chip,
+        num_experts_per_tok=num_experts_per_tok,
+    )
+
+    tt_counts_4d = ttnn.unsqueeze_to_4D(tt_expert_token_counts)
+    ep_composer = get_ep_mesh_composer(mesh_device)
+    host_counts = ttnn.to_torch(tt_counts_4d, mesh_composer=ep_composer).squeeze(2)
+
+    real_rows_per_chip = seq_len_per_chip - num_padded_rows
+    expected_total = dispatch_group_size * real_rows_per_chip * num_experts_per_tok
+
+    for group in range(num_dispatch_groups):
+        actual_total = host_counts[group, 0, :].sum().item()
+        logger.info(
+            f"Group {group}: expected_total={expected_total}, actual_total={actual_total} "
+            f"(sentinel_rows={num_padded_rows})"
+        )
+        assert actual_total == expected_total, (
+            f"Group {group}: token count mismatch. "
+            f"Expected {expected_total} (real={real_rows_per_chip}*{dispatch_group_size}*{num_experts_per_tok}), "
+            f"got {actual_total}. Sentinel rows were not properly excluded."
+        )

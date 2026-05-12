@@ -20,6 +20,8 @@ struct MoeGroupedTopkDeviceOperation {
         float epsilon;
         bool stable_sort;
         tt::tt_metal::MemoryConfig output_mem_config;
+        uint32_t num_real_tokens;
+        uint32_t pad_side;  // 0 = right, 1 = left
     };
 
     struct tensor_args_t {
@@ -79,6 +81,8 @@ moe_grouped_topk(
     float route_scale,
     float epsilon,
     bool stable_sort = false,
-    const std::optional<tt::tt_metal::MemoryConfig>& output_mem_config = std::nullopt);
+    const std::optional<tt::tt_metal::MemoryConfig>& output_mem_config = std::nullopt,
+    uint32_t num_real_tokens = UINT32_MAX,
+    uint32_t pad_side = 0);
 
 }  // namespace ttnn::prim
