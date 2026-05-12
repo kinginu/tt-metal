@@ -42,6 +42,25 @@ def generate_distinct_sigmoid_inputs(shape, min_val=0.05, max_val=0.95, dtype=to
     return torch.stack(all_rows).to(dtype).reshape(shape)
 
 
+def create_padding_config(device, num_real_tokens, pad_side):
+    return ttnn.from_torch(
+        torch.tensor([[num_real_tokens, pad_side]], dtype=torch.int32),
+        dtype=ttnn.uint32,
+        layout=ttnn.ROW_MAJOR_LAYOUT,
+        device=device,
+    )
+
+
+def create_sharded_padding_config(mesh_device, local_real_tokens, pad_side):
+    return ttnn.from_torch(
+        torch.tensor([[num_real_tokens, pad_side] for num_real_tokens in local_real_tokens], dtype=torch.int32),
+        dtype=ttnn.uint32,
+        layout=ttnn.ROW_MAJOR_LAYOUT,
+        device=mesh_device,
+        mesh_mapper=ttnn.ShardTensor2dMesh(mesh_device, dims=(0, None), mesh_shape=mesh_device.shape),
+    )
+
+
 TEST_PARAMS = [(1, 1, 1), (1, 1, 33), (1, 1, 128), (1, 1, 3200)]
 
 TEST_PARAM_IDS = ["minimal", "just_over_one_tile", "four_tiles", "realistic"]
@@ -176,9 +195,10 @@ def test_moe_grouped_topk_sentinel(device, seq_len, num_real_tokens, pad_side):
         route_scale=route_scale,
         epsilon=epsilon,
     )
-    baseline_indices = ttnn.to_torch(baseline_indices_out)[:1, :1, :seq_len, :n_activated_experts]
+    baseline_indices = ttnn.to_torch(baseline_indices_out)[:1, :1, :seq_len, :n_activated_experts].to(torch.int32)
 
     # With padding sentinel
+    padding_config = create_padding_config(device, num_real_tokens, pad_side)
     _, padded_indices_out = ttnn.experimental.deepseek_prefill.moe_grouped_topk(
         ttnn_scores_in,
         ttnn_bias_in,
@@ -188,10 +208,9 @@ def test_moe_grouped_topk_sentinel(device, seq_len, num_real_tokens, pad_side):
         n_activated_experts=n_activated_experts,
         route_scale=route_scale,
         epsilon=epsilon,
-        num_real_tokens=num_real_tokens,
-        pad_side=pad_side,
+        padding_config=padding_config,
     )
-    padded_indices = ttnn.to_torch(padded_indices_out)[:1, :1, :seq_len, :n_activated_experts]
+    padded_indices = ttnn.to_torch(padded_indices_out)[:1, :1, :seq_len, :n_activated_experts].to(torch.int32)
 
     # Determine which rows are real vs padded
     if pad_side == 0:  # right-pad
@@ -220,3 +239,112 @@ def test_moe_grouped_topk_sentinel(device, seq_len, num_real_tokens, pad_side):
             f"  Expected: all {sentinel}"
         )
         logger.info(f"Padded-row indices: all sentinel ({(~real_mask).sum().item()} rows)")
+
+
+SP_SENTINEL_PARAMS = [
+    # (local_real_tokens per SP shard, pad_side, id)
+    ([32, 32, 17, 0], 0, "right_pad_full_partial_empty"),
+    ([32, 32, 0, 0], 0, "right_pad_full_empty"),
+    ([0, 17, 32, 32], 1, "left_pad_empty_partial_full"),
+    ([0, 0, 32, 32], 1, "left_pad_empty_full"),
+]
+
+
+@pytest.mark.parametrize(
+    "mesh_device",
+    [
+        pytest.param(
+            (4, 1),
+            marks=pytest.mark.requires_mesh_topology(mesh_shape=(4, 1), topology="linear"),
+            id="linear-4x1",
+        ),
+    ],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    "local_real_tokens,pad_side",
+    [(n, p) for n, p, _ in SP_SENTINEL_PARAMS],
+    ids=[i for _, _, i in SP_SENTINEL_PARAMS],
+)
+def test_moe_grouped_topk_sentinel_sp(mesh_device, local_real_tokens, pad_side):
+    """Verify per-SP-shard padding config handles full, partial, and empty real-token shards."""
+    torch.manual_seed(42)
+
+    total_experts = 256
+    n_groups = 8
+    summed_experts_per_group = 2
+    topk_groups = 4
+    n_activated_experts = 8
+    epsilon = 1e-20
+    route_scale = 0.5
+    sentinel = total_experts
+    seq_len_per_shard = 32
+    seq_len = seq_len_per_shard * len(local_real_tokens)
+
+    scores = generate_distinct_sigmoid_inputs((1, 1, seq_len, total_experts), dtype=torch.float32)
+    bias = torch.randn(1, 1, seq_len, total_experts, dtype=torch.float32)
+    seq_mesh_mapper = ttnn.ShardTensor2dMesh(mesh_device, dims=(2, None), mesh_shape=mesh_device.shape)
+    seq_mesh_composer = ttnn.ConcatMesh2dToTensor(mesh_device, dims=(2, 3), mesh_shape=mesh_device.shape)
+
+    ttnn_scores_in = ttnn.from_torch(
+        scores, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=mesh_device, mesh_mapper=seq_mesh_mapper
+    )
+    ttnn_bias_in = ttnn.from_torch(
+        bias, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=mesh_device, mesh_mapper=seq_mesh_mapper
+    )
+
+    _, baseline_indices_out = ttnn.experimental.deepseek_prefill.moe_grouped_topk(
+        ttnn_scores_in,
+        ttnn_bias_in,
+        n_groups=n_groups,
+        summed_experts_per_group=summed_experts_per_group,
+        topk_groups=topk_groups,
+        n_activated_experts=n_activated_experts,
+        route_scale=route_scale,
+        epsilon=epsilon,
+    )
+    baseline_indices = ttnn.to_torch(baseline_indices_out, mesh_composer=seq_mesh_composer)[
+        :1, :1, :seq_len, :n_activated_experts
+    ].to(torch.int32)
+
+    padding_config = create_sharded_padding_config(mesh_device, local_real_tokens, pad_side)
+    _, padded_indices_out = ttnn.experimental.deepseek_prefill.moe_grouped_topk(
+        ttnn_scores_in,
+        ttnn_bias_in,
+        n_groups=n_groups,
+        summed_experts_per_group=summed_experts_per_group,
+        topk_groups=topk_groups,
+        n_activated_experts=n_activated_experts,
+        route_scale=route_scale,
+        epsilon=epsilon,
+        padding_config=padding_config,
+    )
+    padded_indices = ttnn.to_torch(padded_indices_out, mesh_composer=seq_mesh_composer)[
+        :1, :1, :seq_len, :n_activated_experts
+    ].to(torch.int32)
+
+    local_masks = []
+    for num_real_tokens in local_real_tokens:
+        if pad_side == 0:
+            local_masks.append(torch.arange(seq_len_per_shard) < num_real_tokens)
+        else:
+            local_masks.append(torch.arange(seq_len_per_shard) >= (seq_len_per_shard - num_real_tokens))
+    real_mask = torch.cat(local_masks)
+
+    real_indices = padded_indices[0, 0, real_mask]
+    padded_row_indices = padded_indices[0, 0, ~real_mask]
+    baseline_real = baseline_indices[0, 0, real_mask]
+
+    if real_mask.any():
+        assert torch.equal(real_indices, baseline_real), (
+            f"Real-row indices differ from baseline!\n"
+            f"  Mismatched rows: {(real_indices != baseline_real).any(dim=-1).nonzero().flatten().tolist()}"
+        )
+
+    if (~real_mask).any():
+        expected = torch.full_like(padded_row_indices, sentinel, dtype=padded_row_indices.dtype)
+        assert torch.equal(padded_row_indices, expected), (
+            f"Padded-row indices are not all sentinel ({sentinel})!\n"
+            f"  Got: {padded_row_indices}\n"
+            f"  Expected: all {sentinel}"
+        )

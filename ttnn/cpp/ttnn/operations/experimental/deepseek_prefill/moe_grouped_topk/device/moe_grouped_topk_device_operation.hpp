@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include <optional>
+
 #include "ttnn/tensor/tensor.hpp"
 #include "ttnn/device_operation.hpp"
 #include "ttnn/operation.hpp"
@@ -20,13 +22,12 @@ struct MoeGroupedTopkDeviceOperation {
         float epsilon;
         bool stable_sort;
         tt::tt_metal::MemoryConfig output_mem_config;
-        uint32_t num_real_tokens;
-        uint32_t pad_side;  // 0 = right, 1 = left
     };
 
     struct tensor_args_t {
         const Tensor& scores;
         const Tensor& bias;
+        std::optional<Tensor> padding_config;
     };
 
     using spec_return_value_t = std::array<TensorSpec, 2>;
@@ -82,7 +83,6 @@ moe_grouped_topk(
     float epsilon,
     bool stable_sort = false,
     const std::optional<tt::tt_metal::MemoryConfig>& output_mem_config = std::nullopt,
-    uint32_t num_real_tokens = UINT32_MAX,
-    uint32_t pad_side = 0);
+    const std::optional<Tensor>& padding_config = std::nullopt);
 
 }  // namespace ttnn::prim

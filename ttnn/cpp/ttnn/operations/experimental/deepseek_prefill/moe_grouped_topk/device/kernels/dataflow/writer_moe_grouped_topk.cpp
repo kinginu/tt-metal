@@ -424,19 +424,34 @@ void kernel_main() {
     constexpr uint32_t seq_len_tiles = get_named_compile_time_arg_val("seq_len_tiles");
     constexpr uint32_t remainder_tokens_per_tile = get_named_compile_time_arg_val("remainder_tokens_per_tile");
     constexpr uint32_t cb_gathered_sigmoid = get_named_compile_time_arg_val("cb_gathered_sigmoid");
+    constexpr uint32_t cb_padding_config = get_named_compile_time_arg_val("cb_padding_config");
 
     const uint32_t weights_addr = get_arg_val<uint32_t>(0);
     const uint32_t indices_addr = get_arg_val<uint32_t>(1);
     const uint32_t start_height_tile = get_arg_val<uint32_t>(2);
     const uint32_t end_height_tile = get_arg_val<uint32_t>(3);
-    const uint32_t num_real_tokens = get_arg_val<uint32_t>(4);
-    const uint32_t pad_side = get_arg_val<uint32_t>(5);
+    const uint32_t padding_config_addr = get_arg_val<uint32_t>(4);
 
     constexpr auto weights_args = TensorAccessorArgs<0>();
     constexpr auto indices_args = TensorAccessorArgs<weights_args.next_compile_time_args_offset()>();
+    constexpr auto padding_config_args = TensorAccessorArgs<indices_args.next_compile_time_args_offset()>();
 
     const auto weights_accessor = TensorAccessor(weights_args, weights_addr, weights_page_size);
     const auto indices_accessor = TensorAccessor(indices_args, indices_addr, indices_page_size);
+    const auto padding_config_accessor = TensorAccessor(padding_config_args, padding_config_addr);
+
+    uint32_t num_real_tokens = 0xFFFFFFFF;  // default: no padding
+    uint32_t pad_side = 0;
+    if (padding_config_addr != 0) {
+        const uint32_t padding_config_l1_addr = get_write_ptr(cb_padding_config);
+        noc_async_read_page(0, padding_config_accessor, padding_config_l1_addr);
+        noc_async_read_barrier();
+
+        volatile tt_l1_ptr uint32_t* padding_config_ptr =
+            reinterpret_cast<volatile tt_l1_ptr uint32_t*>(padding_config_l1_addr);
+        num_real_tokens = padding_config_ptr[0];
+        pad_side = padding_config_ptr[1];
+    }
 
     // while reader and compute kernels are applying the sigmoid, we can create the topk indices
     // I see no performance difference generating these internally inside the writer kernel

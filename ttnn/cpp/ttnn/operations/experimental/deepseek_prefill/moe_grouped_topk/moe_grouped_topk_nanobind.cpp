@@ -30,8 +30,8 @@ void bind_moe_grouped_topk(nb::module_& mod) {
                 epsilon (float): Epsilon for numerical stability when normalizing the scores.
                 stable_sort (bool): Use stable sorting in topk to maintain relative order of equal-valued elements. Defaults to False.
                 memory_config (ttnn.MemoryConfig, optional): Memory configuration for the output tensor. Defaults to None, which results in auto-selection.
-                num_real_tokens (int): Number of real (non-padded) tokens. Padded token rows get sentinel expert indices. Defaults to UINT32_MAX (all tokens are real).
-                pad_side (int): Padding side: 0 = right-padded, 1 = left-padded. Defaults to 0.
+                padding_config (ttnn.Tensor, optional): ROW_MAJOR UINT32 tensor with per-device [num_real_tokens, pad_side].
+                    pad_side is 0 for right padding and 1 for left padding. Defaults to None, which treats all tokens as real.
 
             Returns:
                 Tuple[ttnn.Tensor, ttnn.Tensor]: A tuple containing the scaled expert scores (dtype BFLOAT16) and selected expert indices (dtype UINT16). The shape of the scores tensor should be [N, B, S, 8]. The shape of the indices tensor should be [N, B, S, 8]. N, B and S can be any value. 8 is the number of experts in the final selected groups.
@@ -48,8 +48,7 @@ void bind_moe_grouped_topk(nb::module_& mod) {
         nb::arg("epsilon") = 1e-20f,
         nb::arg("stable_sort") = false,
         nb::arg("memory_config") = nb::none(),
-        nb::arg("num_real_tokens") = UINT32_MAX,
-        nb::arg("pad_side") = 0);
+        nb::arg("padding_config") = nb::none());
 }
 
 }  // namespace ttnn::operations::experimental::deepseek_prefill::moe_grouped_topk::detail

@@ -24,7 +24,6 @@ std::array<Tensor, 2> moe_grouped_topk(
     float epsilon = 1e-20f,
     bool stable_sort = false,
     const std::optional<MemoryConfig>& output_mem_config = std::nullopt,
-    uint32_t num_real_tokens = UINT32_MAX,
-    uint32_t pad_side = 0);
+    const std::optional<Tensor>& padding_config = std::nullopt);
 
 }  // namespace ttnn::operations::experimental::deepseek_prefill::moe_grouped_topk
