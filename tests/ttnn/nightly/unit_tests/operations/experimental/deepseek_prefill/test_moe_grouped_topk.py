@@ -16,6 +16,7 @@ from loguru import logger
 import ttnn
 from models.demos.deepseek_v3.reference.configuration_deepseek import DeepseekV3Config
 from models.demos.deepseek_v3.reference.modeling_deepseek import MoEGate
+from models.demos.deepseek_v3_d_p.tt.mla.utils import create_balanced_chunk_order, reorder_tensor_chunks
 from models.demos.deepseek_v3_d_p.tt.moe.validation_helpers import calculate_average_recall
 from tests.ttnn.utils_for_testing import comp_pcc
 
@@ -348,3 +349,160 @@ def test_moe_grouped_topk_w_padding_awareness_sp(mesh_device, local_real_tokens,
             f"  Got: {padded_row_indices}\n"
             f"  Expected: all {sentinel}"
         )
+
+
+def _compute_balanced_local_real_tokens(sp_factor, total_tokens, num_real_tokens, padding_side):
+    """Compute per-SP-device real token counts under zigzag/balanced placement."""
+    num_chunks = 2 * sp_factor
+    chunk_size = total_tokens // num_chunks
+    result = []
+    for sp_idx in range(sp_factor):
+        chunk_a = sp_idx
+        chunk_b = num_chunks - 1 - sp_idx
+        if padding_side == "right":
+            real_a = min(chunk_size, max(0, num_real_tokens - chunk_a * chunk_size))
+            real_b = min(chunk_size, max(0, num_real_tokens - chunk_b * chunk_size))
+        else:
+            total_padded = max(0, total_tokens - num_real_tokens)
+            pad_a = min(chunk_size, max(0, total_padded - chunk_a * chunk_size))
+            pad_b = min(chunk_size, max(0, total_padded - chunk_b * chunk_size))
+            real_a = chunk_size - pad_a
+            real_b = chunk_size - pad_b
+        result.append(real_a + real_b)
+    return result
+
+
+BALANCED_PADDING_PARAMS = [
+    # (num_real_tokens, padding_side, id)
+    (100, "right", "balanced_right_pad_partial"),
+    (64, "right", "balanced_right_pad_half"),
+    (128, "right", "balanced_right_pad_none"),
+    (1, "right", "balanced_right_pad_almost_all"),
+    (100, "left", "balanced_left_pad_partial"),
+    (64, "left", "balanced_left_pad_half"),
+]
+
+
+@pytest.mark.parametrize(
+    "mesh_device",
+    [
+        pytest.param(
+            (4, 1),
+            marks=pytest.mark.requires_mesh_topology(mesh_shape=(4, 1), topology="linear"),
+            id="linear-4x1",
+        ),
+    ],
+    indirect=True,
+)
+@pytest.mark.parametrize(
+    "num_real_tokens,padding_side",
+    [(n, p) for n, p, _ in BALANCED_PADDING_PARAMS],
+    ids=[i for _, _, i in BALANCED_PADDING_PARAMS],
+)
+def test_moe_grouped_topk_w_balanced_padding_awareness_sp(mesh_device, num_real_tokens, padding_side):
+    """Verify padding awareness works correctly with zigzag/balanced sequence placement.
+
+    Reorders input data using the same balanced chunk order as the transformer,
+    then verifies that the balanced padding config produces correct sentinel masking
+    (sentinels on padded rows, bit-exact match on real rows vs. unpadded baseline).
+    """
+    torch.manual_seed(42)
+
+    total_experts = 256
+    n_groups = 8
+    summed_experts_per_group = 2
+    topk_groups = 4
+    n_activated_experts = 8
+    epsilon = 1e-20
+    route_scale = 0.5
+    sentinel = total_experts
+
+    sp_factor = mesh_device.shape[0]
+    seq_len_per_shard = 32
+    seq_len = seq_len_per_shard * sp_factor
+    pad_side = 0 if padding_side == "right" else 1
+
+    # Generate data in original (pre-balanced) order
+    scores_orig = generate_distinct_sigmoid_inputs((1, 1, seq_len, total_experts), dtype=torch.float32)
+    bias_orig = torch.randn(1, 1, seq_len, total_experts, dtype=torch.float32)
+
+    # Reorder with balanced chunk order (same as transformer does before sharding)
+    chunk_order = create_balanced_chunk_order(sp_factor)
+    scores = reorder_tensor_chunks(scores_orig, chunk_order, seq_dim=2)
+    bias = reorder_tensor_chunks(bias_orig, chunk_order, seq_dim=2)
+
+    seq_mesh_mapper = ttnn.ShardTensor2dMesh(mesh_device, dims=(2, None), mesh_shape=mesh_device.shape)
+    seq_mesh_composer = ttnn.ConcatMesh2dToTensor(mesh_device, dims=(2, 3), mesh_shape=mesh_device.shape)
+
+    ttnn_scores_in = ttnn.from_torch(
+        scores, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=mesh_device, mesh_mapper=seq_mesh_mapper
+    )
+    ttnn_bias_in = ttnn.from_torch(
+        bias, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=mesh_device, mesh_mapper=seq_mesh_mapper
+    )
+
+    # Baseline: no padding config (all rows treated as real)
+    _, baseline_indices_out = ttnn.experimental.deepseek_prefill.moe_grouped_topk(
+        ttnn_scores_in,
+        ttnn_bias_in,
+        n_groups=n_groups,
+        summed_experts_per_group=summed_experts_per_group,
+        topk_groups=topk_groups,
+        n_activated_experts=n_activated_experts,
+        route_scale=route_scale,
+        epsilon=epsilon,
+    )
+    baseline_indices = ttnn.to_torch(baseline_indices_out, mesh_composer=seq_mesh_composer)[
+        :1, :1, :seq_len, :n_activated_experts
+    ].to(torch.int32)
+
+    # Compute balanced per-device real token counts
+    local_real_tokens = _compute_balanced_local_real_tokens(sp_factor, seq_len, num_real_tokens, padding_side)
+    logger.info(f"Balanced local_real_tokens: {local_real_tokens} (total={sum(local_real_tokens)})")
+
+    padding_config = create_sharded_padding_config(mesh_device, local_real_tokens, pad_side)
+    _, padded_indices_out = ttnn.experimental.deepseek_prefill.moe_grouped_topk(
+        ttnn_scores_in,
+        ttnn_bias_in,
+        n_groups=n_groups,
+        summed_experts_per_group=summed_experts_per_group,
+        topk_groups=topk_groups,
+        n_activated_experts=n_activated_experts,
+        route_scale=route_scale,
+        epsilon=epsilon,
+        padding_config=padding_config,
+    )
+    padded_indices = ttnn.to_torch(padded_indices_out, mesh_composer=seq_mesh_composer)[
+        :1, :1, :seq_len, :n_activated_experts
+    ].to(torch.int32)
+
+    # Build per-shard real/pad masks (in the reordered/balanced local buffer order)
+    local_masks = []
+    for shard_real in local_real_tokens:
+        if pad_side == 0:  # right pad
+            local_masks.append(torch.arange(seq_len_per_shard) < shard_real)
+        else:  # left pad
+            local_masks.append(torch.arange(seq_len_per_shard) >= (seq_len_per_shard - shard_real))
+    real_mask = torch.cat(local_masks)
+
+    real_indices = padded_indices[0, 0, real_mask]
+    padded_row_indices = padded_indices[0, 0, ~real_mask]
+    baseline_real = baseline_indices[0, 0, real_mask]
+
+    # Real rows must be bit-exact to baseline
+    if real_mask.any():
+        assert torch.equal(real_indices, baseline_real), (
+            f"Real-row indices differ from baseline!\n"
+            f"  Mismatched rows: {(real_indices != baseline_real).any(dim=-1).nonzero().flatten().tolist()}"
+        )
+        logger.info(f"Real-row indices: bit-exact match ({real_mask.sum().item()} rows)")
+
+    # Padded rows must all be sentinel
+    if (~real_mask).any():
+        expected = torch.full_like(padded_row_indices, sentinel, dtype=padded_row_indices.dtype)
+        assert torch.equal(padded_row_indices, expected), (
+            f"Padded-row indices are not all sentinel ({sentinel})!\n"
+            f"  Got: {padded_row_indices}\n"
+            f"  Expected: all {sentinel}"
+        )
+        logger.info(f"Padded-row indices: all sentinel ({(~real_mask).sum().item()} rows)")

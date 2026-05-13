@@ -153,6 +153,7 @@ class TtMoe(LightweightModule):
         weight_cache_path: Optional[Path] = None,
         layer_idx: int = 0,
         overlap_shared_expert_with_dispatch: bool = True,
+        is_balanced: bool = False,
     ):
         """
         Initialize TtMoe module.
@@ -189,6 +190,8 @@ class TtMoe(LightweightModule):
             overlap_shared_expert_with_dispatch: If True, run the shared expert and dispatch
                 on disjoint sub-devices so they overlap on-chip. If False, skip sub-device
                 setup and run them sequentially on the full Tensix grid.
+            is_balanced: If True, uses zigzag sequence placement for padding awareness.
+                Should match the is_balanced flag used in MLA/transformer.
         """
         super().__init__()
         self.mesh_device = mesh_device
@@ -243,6 +246,7 @@ class TtMoe(LightweightModule):
             fallback_mode=gate_fallback_mode,
             weight_cache_path=weight_cache_path,
             cache_name_prefix=f"layer_{layer_idx}.gate",
+            is_balanced=is_balanced,
         )
 
         self.routing_setup = TtMoERoutingSetup(

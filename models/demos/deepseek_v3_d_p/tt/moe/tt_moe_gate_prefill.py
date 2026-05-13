@@ -224,15 +224,19 @@ class TtMoEGatePrefill(LightweightModule):
         fallback_mode: GateComputeMode = GateComputeMode.DEVICE,
         weight_cache_path: Optional[Path] = None,
         cache_name_prefix: Optional[str] = None,
+        is_balanced: bool = False,
     ):
         """
         Args:
             weight: Gate weight in HF convention: (n_routed_experts, dim).
                     Transposed internally to (dim, n_routed_experts) for the TTNN matmul path.
+            is_balanced: If True, uses zigzag (balanced) sequence placement across SP devices.
+                Affects per-device real token count computation for padding awareness.
         """
         self.config = config
         self.mesh_device = mesh_device
         self.fallback_mode = fallback_mode
+        self.is_balanced = is_balanced
 
         if weight is not None and bias is not None:
             weights = self._convert_and_cache_gate_weights(
@@ -419,8 +423,15 @@ class TtMoEGatePrefill(LightweightModule):
             epsilon=1e-20,
         )
 
-    def _make_padding_config_tensor(self, actual_isl: int, padding_side: str) -> ttnn.Tensor:
-        """Create per-SP-shard [local_actual_isl, pad_side] config for moe_grouped_topk."""
+    def _make_padding_config_tensor(self, num_real_tokens: int, padding_side: str) -> ttnn.Tensor:
+        """Create per-SP-shard [local_num_real_tokens, pad_side] config for moe_grouped_topk.
+
+        When is_balanced=True, the sequence uses zigzag placement: the original sequence
+        is split into 2*sp_factor chunks and device d holds chunks d and (2*sp_factor-1-d),
+        early chunk first. Padding remains contiguous on the expected side within each
+        device's local buffer because early chunks always precede late chunks locally.
+        Only the per-device real token count changes relative to the sequential case.
+        """
         if padding_side not in ("right", "left"):
             raise ValueError(f"padding_side must be 'right' or 'left', got {padding_side!r}")
 
@@ -430,15 +441,36 @@ class TtMoEGatePrefill(LightweightModule):
         pad_side = 0 if padding_side == "right" else 1
 
         padding_config = []
-        for sp_idx in range(sp_factor):
-            if padding_side == "right":
-                local_real_tokens = min(seq_len_per_chip, max(0, actual_isl - sp_idx * seq_len_per_chip))
-            else:
-                total_padded_tokens = max(0, total_tokens - actual_isl)
-                local_padded_tokens = min(seq_len_per_chip, max(0, total_padded_tokens - sp_idx * seq_len_per_chip))
-                local_real_tokens = seq_len_per_chip - local_padded_tokens
 
-            padding_config.append([local_real_tokens, pad_side])
+        if self.is_balanced:
+            num_chunks = 2 * sp_factor
+            chunk_size = total_tokens // num_chunks
+
+            for sp_idx in range(sp_factor):
+                chunk_a = sp_idx
+                chunk_b = num_chunks - 1 - sp_idx
+
+                if padding_side == "right":
+                    real_a = min(chunk_size, max(0, num_real_tokens - chunk_a * chunk_size))
+                    real_b = min(chunk_size, max(0, num_real_tokens - chunk_b * chunk_size))
+                else:
+                    total_padded = max(0, total_tokens - num_real_tokens)
+                    pad_a = min(chunk_size, max(0, total_padded - chunk_a * chunk_size))
+                    pad_b = min(chunk_size, max(0, total_padded - chunk_b * chunk_size))
+                    real_a = chunk_size - pad_a
+                    real_b = chunk_size - pad_b
+
+                padding_config.append([real_a + real_b, pad_side])
+        else:
+            for sp_idx in range(sp_factor):
+                if padding_side == "right":
+                    local_real_tokens = min(seq_len_per_chip, max(0, num_real_tokens - sp_idx * seq_len_per_chip))
+                else:
+                    total_padded_tokens = max(0, total_tokens - num_real_tokens)
+                    local_padded_tokens = min(seq_len_per_chip, max(0, total_padded_tokens - sp_idx * seq_len_per_chip))
+                    local_real_tokens = seq_len_per_chip - local_padded_tokens
+
+                padding_config.append([local_real_tokens, pad_side])
 
         return ttnn.from_torch(
             torch.tensor(padding_config, dtype=torch.int32),

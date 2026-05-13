@@ -249,6 +249,7 @@ class TtPrefillBlock(LightweightModule):
                 weight_cache_path=weight_cache_path,
                 layer_idx=layer_idx,
                 dispatch_buffer_capacity_factor=dispatch_buffer_capacity_factor,
+                is_balanced=is_balanced,
             )
         else:
             self.ffn = TtFfn(
@@ -277,6 +278,7 @@ class TtPrefillBlock(LightweightModule):
         dispatch_buffer_capacity_factor,
         weight_cache_path=None,
         layer_idx=0,
+        is_balanced=False,
     ):
         mesh_config = extract_mesh_config(mesh_device)
         sp_factor = mesh_device.shape[sp_axis]
@@ -321,6 +323,7 @@ class TtPrefillBlock(LightweightModule):
             gate_fallback_mode=gate_fallback_mode,
             weight_cache_path=weight_cache_path,
             layer_idx=layer_idx,
+            is_balanced=is_balanced,
         )
 
     def forward(
