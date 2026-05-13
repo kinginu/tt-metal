@@ -165,7 +165,7 @@ SENTINEL_PARAMS = [
     [(s, n, p) for s, n, p, _ in SENTINEL_PARAMS],
     ids=[i for _, _, _, i in SENTINEL_PARAMS],
 )
-def test_moe_grouped_topk_sentinel(device, seq_len, num_real_tokens, pad_side):
+def test_moe_grouped_topk_w_padding_awareness(device, seq_len, num_real_tokens, pad_side):
     """Verify that padded token rows get sentinel indices while real rows are bit-exact to baseline."""
     torch.manual_seed(42)
 
@@ -241,7 +241,7 @@ def test_moe_grouped_topk_sentinel(device, seq_len, num_real_tokens, pad_side):
         logger.info(f"Padded-row indices: all sentinel ({(~real_mask).sum().item()} rows)")
 
 
-SP_SENTINEL_PARAMS = [
+SP_PADDING_AWARENESS_PARAMS = [
     # (local_real_tokens per SP shard, pad_side, id)
     ([32, 32, 17, 0], 0, "right_pad_full_partial_empty"),
     ([32, 32, 0, 0], 0, "right_pad_full_empty"),
@@ -263,10 +263,10 @@ SP_SENTINEL_PARAMS = [
 )
 @pytest.mark.parametrize(
     "local_real_tokens,pad_side",
-    [(n, p) for n, p, _ in SP_SENTINEL_PARAMS],
-    ids=[i for _, _, i in SP_SENTINEL_PARAMS],
+    [(n, p) for n, p, _ in SP_PADDING_AWARENESS_PARAMS],
+    ids=[i for _, _, i in SP_PADDING_AWARENESS_PARAMS],
 )
-def test_moe_grouped_topk_sentinel_sp(mesh_device, local_real_tokens, pad_side):
+def test_moe_grouped_topk_w_padding_awareness_sp(mesh_device, local_real_tokens, pad_side):
     """Verify per-SP-shard padding config handles full, partial, and empty real-token shards."""
     torch.manual_seed(42)
 

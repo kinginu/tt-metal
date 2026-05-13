@@ -327,7 +327,7 @@ def test_prep_dispatch_combine(
     indirect=["mesh_device", "device_params"],
 )
 @pytest.mark.parametrize("num_padded_rows", [100, 1600, 3199], ids=["few_padded", "half_padded", "nearly_all_padded"])
-def test_routing_setup_with_sentinel(
+def test_routing_setup_w_padding_awareness(
     mesh_device,
     seq_len_per_chip,
     emb_dim,
