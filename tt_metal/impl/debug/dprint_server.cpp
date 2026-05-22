@@ -507,14 +507,24 @@ void DevicePrintImpl::print_buffer_data(
                     return;
                 }
                 auto payload_bytes = buffer_remaining_bytes.subspan(0, header->message_payload);
-                auto formatted_message =
-                    elf_parser->format_message(header->info_id, payload_bytes, format_message_buffer);
+                std::string formatted_message{
+                    elf_parser->format_message(header->info_id, payload_bytes, format_message_buffer)};
                 if (!formatted_message.empty()) {
                     // Find if we have something buffered from before
                     if (!risc_data.message_buffer.empty()) {
                         // We have something in the buffer, prepend it to the current message and clear the buffer.
                         risc_data.message_buffer += formatted_message;
                         formatted_message = risc_data.message_buffer;
+                    }
+
+                    // DEVICE_PRINT will output '\r' when it wants to open a new line without
+                    // flushing the host buffer for that core. This allows multiple calls to DEVICE_PRINT
+                    // to span multiple lines without interleaving with prints from other cores
+                    auto last_newline_pos = formatted_message.rfind('\n');
+                    if (last_newline_pos != std::string::npos) {
+                        // replace the '\r' before the '\n' because they will be flushed in this iteration
+                        std::replace(
+                            formatted_message.begin(), formatted_message.begin() + last_newline_pos, '\r', '\n');
                     }
 
                     // Check if we hit new line
