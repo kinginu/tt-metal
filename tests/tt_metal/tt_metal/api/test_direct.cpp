@@ -21,6 +21,7 @@
 #include <tt-metalium/buffer.hpp>
 #include <tt-metalium/buffer_types.hpp>
 #include <tt-metalium/circular_buffer_config.hpp>
+#include <tt-metalium/constants.hpp>
 #include <tt-metalium/core_coord.hpp>
 #include <tt-metalium/kernel_types.hpp>
 #include <tt-metalium/device.hpp>
@@ -336,6 +337,7 @@ struct ReaderDatacopyWriterConfig {
     tt::DataFormat l1_input_data_format = tt::DataFormat::Invalid;
     tt::DataFormat l1_output_data_format = tt::DataFormat::Invalid;
     experimental::metal2_host_api::NodeCoord node;
+    bool dst_full_sync_en = false;
 };
 
 // Shared host-side state for reader_datacopy_writer: DRAM buffers, sizing,
@@ -480,6 +482,11 @@ bool reader_datacopy_writer(
         .config_spec = writer_dm_cfg,
     };
 
+    // 32-bit input formats require 32-bit dest mode; otherwise the unpacker
+    // would write 32-bit data into a 16-bit dest. Derived, not user-supplied.
+    const bool fp32_dest_acc_en = (test_config.l1_input_data_format == tt::DataFormat::Float32) ||
+                                  (test_config.l1_input_data_format == tt::DataFormat::Int32) ||
+                                  (test_config.l1_input_data_format == tt::DataFormat::UInt32);
     experimental::metal2_host_api::KernelSpec compute_spec{
         .unique_id = COMPUTE,
         .source =
@@ -500,7 +507,16 @@ bool reader_datacopy_writer(
                  .access_pattern = experimental::metal2_host_api::DFBAccessPattern::STRIDED,
              }},
         .compile_time_arg_bindings = {{"per_core_tile_cnt", per_core_tile_cnt}},
-        .config_spec = experimental::metal2_host_api::ComputeConfiguration{},
+        .config_spec =
+            experimental::metal2_host_api::ComputeConfiguration{
+                .fp32_dest_acc_en = fp32_dest_acc_en,
+                .dst_full_sync_en = test_config.dst_full_sync_en,
+                .unpack_to_dest_mode =
+                    (test_config.l1_input_data_format == tt::DataFormat::Float32)
+                        ? std::vector<experimental::metal2_host_api::ComputeConfiguration::UnpackToDestModeEntry>{
+                              {INPUT_DFB, tt::tt_metal::UnpackToDestMode::UnpackToDestFp32}}
+                        : std::vector<experimental::metal2_host_api::ComputeConfiguration::UnpackToDestModeEntry>{},
+            },
     };
 
     experimental::metal2_host_api::WorkUnitSpec wu{
@@ -601,13 +617,66 @@ TEST_F(MeshDeviceFixture, TensixSingleCoreDirectDramReaderDatacopyWriter) {
         .l1_output_data_format = tt::DataFormat::Float16_b,
         .node = experimental::metal2_host_api::NodeCoord(0, 0)};
     for (unsigned int id = 0; id < num_devices_; id++) {
-        if (devices_.at(id)->arch() != ARCH::QUASAR) { // TODO (#38092): Remove when we can run back to back tests on Quasar
+        if (devices_.at(id)->arch() !=
+            ARCH::QUASAR) {  // TODO (#38092): Remove when we can run back to back tests on Quasar
             test_config.num_tiles = 1;
             ASSERT_TRUE(unit_tests::dram::direct::reader_datacopy_writer(devices_.at(id), test_config));
             test_config.num_tiles = 4;
             ASSERT_TRUE(unit_tests::dram::direct::reader_datacopy_writer(devices_.at(id), test_config));
         }
         test_config.num_tiles = 8;
+        ASSERT_TRUE(unit_tests::dram::direct::reader_datacopy_writer(devices_.at(id), test_config));
+    }
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarDatacopyToDestWriter_Int32_SyncFull) {
+    unit_tests::dram::direct::ReaderDatacopyWriterConfig test_config = {
+        .num_tiles = 4,
+        .tile_byte_size = sizeof(int32_t) * constants::TILE_HEIGHT * constants::TILE_WIDTH,
+        .l1_input_data_format = tt::DataFormat::Int32,
+        .l1_output_data_format = tt::DataFormat::Int32,
+        .node = experimental::metal2_host_api::NodeCoord(0, 0),
+        .dst_full_sync_en = true};
+    for (unsigned int id = 0; id < num_devices_; id++) {
+        ASSERT_TRUE(unit_tests::dram::direct::reader_datacopy_writer(devices_.at(id), test_config));
+    }
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarDatacopyToDestWriter_Int32_SyncHalf) {
+    unit_tests::dram::direct::ReaderDatacopyWriterConfig test_config = {
+        .num_tiles = 4,
+        .tile_byte_size = sizeof(int32_t) * constants::TILE_HEIGHT * constants::TILE_WIDTH,
+        .l1_input_data_format = tt::DataFormat::Int32,
+        .l1_output_data_format = tt::DataFormat::Int32,
+        .node = experimental::metal2_host_api::NodeCoord(0, 0),
+        .dst_full_sync_en = false};
+    for (unsigned int id = 0; id < num_devices_; id++) {
+        ASSERT_TRUE(unit_tests::dram::direct::reader_datacopy_writer(devices_.at(id), test_config));
+    }
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarDatacopyToDestWriter_Float32_SyncFull) {
+    unit_tests::dram::direct::ReaderDatacopyWriterConfig test_config = {
+        .num_tiles = 4,
+        .tile_byte_size = sizeof(float) * constants::TILE_HEIGHT * constants::TILE_WIDTH,
+        .l1_input_data_format = tt::DataFormat::Float32,
+        .l1_output_data_format = tt::DataFormat::Float32,
+        .node = experimental::metal2_host_api::NodeCoord(0, 0),
+        .dst_full_sync_en = true};
+    for (unsigned int id = 0; id < num_devices_; id++) {
+        ASSERT_TRUE(unit_tests::dram::direct::reader_datacopy_writer(devices_.at(id), test_config));
+    }
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarDatacopyToDestWriter_Float32_SyncHalf) {
+    unit_tests::dram::direct::ReaderDatacopyWriterConfig test_config = {
+        .num_tiles = 4,
+        .tile_byte_size = sizeof(float) * constants::TILE_HEIGHT * constants::TILE_WIDTH,
+        .l1_input_data_format = tt::DataFormat::Float32,
+        .l1_output_data_format = tt::DataFormat::Float32,
+        .node = experimental::metal2_host_api::NodeCoord(0, 0),
+        .dst_full_sync_en = false};
+    for (unsigned int id = 0; id < num_devices_; id++) {
         ASSERT_TRUE(unit_tests::dram::direct::reader_datacopy_writer(devices_.at(id), test_config));
     }
 }

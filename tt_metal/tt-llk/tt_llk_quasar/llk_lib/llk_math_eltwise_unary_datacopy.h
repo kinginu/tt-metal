@@ -109,9 +109,23 @@ inline void _llk_math_eltwise_unary_datacopy_addrmod_(const std::uint32_t num_ro
  * If unpacker is unpacking 1 32x32 tile, with 1 dvalid -> set this value to 1
  * If unpacker is unpacking 4 faces (16x16 each), with 4 dvalids -> set this value to 4
  */
-template <DataCopyType DATA_COPY_TYPE, bool IS_32b_DEST_EN>
-inline void _llk_math_eltwise_unary_datacopy_init_(const std::uint32_t num_rows_per_matrix, const std::uint32_t num_matrices = NUM_TILES)
+template <DataCopyType DATA_COPY_TYPE, bool IS_32b_DEST_EN, bool unpack_to_dest = false>
+inline void _llk_math_eltwise_unary_datacopy_init_(
+    const std::uint32_t num_rows_per_matrix, const std::uint32_t num_matrices = NUM_TILES, const std::uint32_t buf_desc_id = 0)
 {
+    // When unpack-to-dest is active for a 32-bit operand, the unpacker writes DEST directly
+    // via UNP_DEST and math is a sync-only forwarder — skip programming the MOP.
+    // bd_table is the on-chip BD config-space table populated by the unpack-side configure;
+    // math reads the operand's L1 format from it (operand_id == buf_desc_id by convention).
+    if constexpr (unpack_to_dest)
+    {
+        const std::uint32_t bd_format = bd_table[buf_desc_id].f.format;
+        if (bd_format == (std::uint32_t)DataFormat::Float32 || bd_format == (std::uint32_t)DataFormat::Int32)
+        {
+            return;
+        }
+    }
+
     // MOVA2D/MOVB2D can move 1, 4 or 8 rows, need to check which
     // For Float32 or Integer dest, ELWADD will be used for rebiasing, can only move MATH_ROWS
     const std::uint32_t num_rows_per_move_instrn = [num_rows_per_matrix]() -> const std::uint32_t
@@ -146,8 +160,21 @@ inline void _llk_math_eltwise_unary_datacopy_init_(const std::uint32_t num_rows_
  * If dest reg in float16 mode -> values = [0 - 8] in double buffering mode, values = [0 - 16] in full mode
  * If dest reg in float32 mode -> values = [0 - 4] in double buffering mode, values = [0 - 8] in full mode
  */
-inline void _llk_math_eltwise_unary_datacopy_(const std::uint32_t num_rows_per_tile, const std::uint32_t tile_idx)
+template <bool unpack_to_dest = false>
+inline void _llk_math_eltwise_unary_datacopy_(const std::uint32_t num_rows_per_tile, const std::uint32_t tile_idx, const std::uint32_t buf_desc_id = 0)
 {
+    // When unpack-to-dest is active for a 32-bit operand, no math work runs — the unpacker
+    // has already written DEST and posts UNPACK_MATH directly. Format is read from the BD
+    // table (operand_id == buf_desc_id by convention) rather than threaded as a value.
+    if constexpr (unpack_to_dest)
+    {
+        const std::uint32_t bd_format = bd_table[buf_desc_id].f.format;
+        if (bd_format == (std::uint32_t)DataFormat::Float32 || bd_format == (std::uint32_t)DataFormat::Int32)
+        {
+            return;
+        }
+    }
+
     _set_dst_write_addr_by_rows_(num_rows_per_tile, tile_idx);
 
     // Run MOP

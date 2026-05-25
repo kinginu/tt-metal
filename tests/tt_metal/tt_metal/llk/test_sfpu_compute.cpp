@@ -2,11 +2,13 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <bit>
 #include <chrono>
 #include <fmt/base.h>
 #include <gtest/gtest.h>
 #include <cstddef>
 #include <cstdint>
+#include <random>
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/tt_metal.hpp>
 #include <algorithm>
@@ -197,6 +199,47 @@ bool is_close_packed_sfpu_output(
         vec_a, vec_b, [&](const bfloat16& a, const bfloat16& b) { return is_close(a, b, 0.06f, 0.006f); });
 }
 
+float sfpu_function_f32(const std::string& op_name, float input) {
+    if (op_name == "relu") {
+        return fmaxf(input, 0.0f);
+    }
+    TT_THROW("Unsupported op_name in test (Float32 path supports relu only in v1)");
+}
+
+// Float32 has 1:1 element-to-word packing, so the bf16-oriented pack_vector/unpack_vector
+// templates (which assume sub-word packing) don't instantiate here. Use std::bit_cast loops
+// instead, matching test_transpose.cpp:404-410.
+std::vector<uint32_t> generate_packed_sfpu_input_f32(unsigned int numel, const std::string& op_name, int seed) {
+    if (op_name != "relu") {
+        TT_THROW("Unsupported op_name in test (Float32 path supports relu only in v1)");
+    }
+    std::vector<uint32_t> packed(numel);
+    std::mt19937 rng(static_cast<uint32_t>(seed));
+    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
+    for (auto& w : packed) {
+        w = std::bit_cast<uint32_t>(dist(rng));
+    }
+    return packed;
+}
+
+bool is_close_packed_sfpu_output_f32(
+    const std::vector<uint32_t>& vec_a, const std::vector<uint32_t>& vec_b, const std::string& op_name) {
+    if (op_name != "relu") {
+        TT_THROW("Unsupported op_name in test (Float32 path supports relu only in v1)");
+    }
+    if (vec_a.size() != vec_b.size()) {
+        return false;
+    }
+    for (size_t i = 0; i < vec_a.size(); ++i) {
+        const float a = std::bit_cast<float>(vec_a[i]);
+        const float b = std::bit_cast<float>(vec_b[i]);
+        if (!is_close(a, b, 0.06f, 0.006f)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 }  // namespace unit_tests::sfpu_util
 
 namespace unit_tests::compute::sfpu {
@@ -209,6 +252,8 @@ struct SfpuConfig {
     CoreRangeSet cores;
     std::string sfpu_op;
     bool approx_mode = true;
+    bool dst_full_sync_en = true;      // SyncFull by default (matches today's implicit behavior)
+    bool unpack_to_dest_fp32 = false;  // Quasar Float32 path; default false keeps the bf16 path byte-identical
 };
 
 /// @brief Does Dram --> Reader --> CB --> Sfpu Compute --> CB --> Writer --> Dram. So far, enqueue APIs only added to
@@ -231,16 +276,31 @@ bool run_sfpu_all_same_buffer(
     auto output_dram_buffer = CreateBuffer(dram_config);
 
     // Input
-    std::vector<uint32_t> packed_input = sfpu_util::generate_packed_sfpu_input(
-        byte_size / sizeof(bfloat16), test_config.sfpu_op, std::chrono::system_clock::now().time_since_epoch().count());
+    const bool is_fp32 = (test_config.l1_input_data_format == tt::DataFormat::Float32);
+    const size_t element_size = is_fp32 ? sizeof(float) : sizeof(bfloat16);
+    const size_t numel = byte_size / element_size;
+    const auto seed = std::chrono::system_clock::now().time_since_epoch().count();
+    std::vector<uint32_t> packed_input =
+        is_fp32 ? sfpu_util::generate_packed_sfpu_input_f32(numel, test_config.sfpu_op, seed)
+                : sfpu_util::generate_packed_sfpu_input(numel, test_config.sfpu_op, seed);
 
     // Golden output
-    auto input = unpack_vector<bfloat16, uint32_t>(packed_input);
-    std::vector<bfloat16> golden(input.size());
-    std::transform(input.begin(), input.end(), golden.begin(), [&](const bfloat16& val) {
-        return sfpu_util::sfpu_function(test_config.sfpu_op, val);
-    });
-    std::vector<uint32_t> packed_golden = pack_vector<uint32_t, bfloat16>(golden);
+    std::vector<uint32_t> packed_golden;
+    if (is_fp32) {
+        // 1:1 element-to-word; bit_cast in/out per-element.
+        packed_golden.resize(packed_input.size());
+        for (size_t i = 0; i < packed_input.size(); ++i) {
+            const float in = std::bit_cast<float>(packed_input[i]);
+            packed_golden[i] = std::bit_cast<uint32_t>(sfpu_util::sfpu_function_f32(test_config.sfpu_op, in));
+        }
+    } else {
+        auto input = unpack_vector<bfloat16, uint32_t>(packed_input);
+        std::vector<bfloat16> golden(input.size());
+        std::transform(input.begin(), input.end(), golden.begin(), [&](const bfloat16& val) {
+            return sfpu_util::sfpu_function(test_config.sfpu_op, val);
+        });
+        packed_golden = pack_vector<uint32_t, bfloat16>(golden);
+    }
 
     std::map<std::string, std::string> sfpu_defines = sfpu_util::sfpu_op_to_op_name.at(test_config.sfpu_op);
     sfpu_defines["SFPU_UNARY_OP"] = "1";
@@ -360,7 +420,15 @@ bool run_sfpu_all_same_buffer(
             {{"per_core_block_cnt", static_cast<uint32_t>(test_config.num_tiles)}, {"per_core_block_dim", 1u}},
         .config_spec =
             experimental::metal2_host_api::ComputeConfiguration{
+                .fp32_dest_acc_en = test_config.unpack_to_dest_fp32,
+                .dst_full_sync_en = test_config.dst_full_sync_en,
                 .math_approx_mode = test_config.approx_mode,
+                .unpack_to_dest_mode =
+                    test_config.unpack_to_dest_fp32
+                        ? std::vector<
+                              experimental::metal2_host_api::ComputeConfiguration::
+                                  UnpackToDestModeEntry>{{IN_DFB, tt::tt_metal::UnpackToDestMode::UnpackToDestFp32}}
+                        : std::vector<experimental::metal2_host_api::ComputeConfiguration::UnpackToDestModeEntry>{},
             },
     };
 
@@ -418,7 +486,8 @@ bool run_sfpu_all_same_buffer(
     std::vector<uint32_t> dest_buffer_data;
     tt_metal::detail::ReadFromBuffer(output_dram_buffer, dest_buffer_data);
 
-    return sfpu_util::is_close_packed_sfpu_output(dest_buffer_data, packed_golden, test_config.sfpu_op);
+    return is_fp32 ? sfpu_util::is_close_packed_sfpu_output_f32(dest_buffer_data, packed_golden, test_config.sfpu_op)
+                   : sfpu_util::is_close_packed_sfpu_output(dest_buffer_data, packed_golden, test_config.sfpu_op);
 }
 
 /// High-level flow:
@@ -648,6 +717,30 @@ bool run_sfpu_binary_two_input_buffer(
 }
 
 }  // namespace unit_tests::compute::sfpu
+
+void run_quasar_sfpu_unpack_to_dest_fp32(
+    const std::shared_ptr<distributed::MeshDevice>& dev,
+    size_t num_tiles,
+    const std::string& sfpu_op,
+    bool dst_full_sync_en) {
+    CoreRange core_range({0, 0}, {0, 0});
+    CoreRangeSet core_range_set({core_range});
+    unit_tests::compute::sfpu::SfpuConfig cfg{
+        .num_tiles = num_tiles,
+        .tile_byte_size = 4 * 32 * 32,
+        .l1_input_data_format = tt::DataFormat::Float32,
+        .l1_output_data_format = tt::DataFormat::Float32,
+        .cores = core_range_set,
+        .sfpu_op = sfpu_op,
+        .approx_mode = false,
+        .dst_full_sync_en = dst_full_sync_en,
+        .unpack_to_dest_fp32 = true,
+    };
+    log_info(
+        tt::LogTest, "Quasar SFPU FP32: op={} num_tiles={} dst_full_sync_en={}", sfpu_op, num_tiles, dst_full_sync_en);
+    EXPECT_TRUE(unit_tests::compute::sfpu::run_sfpu_all_same_buffer(dev, cfg));
+}
+
 class SingleCoreSingleMeshDeviceSfpuParameterizedFixture
     : public LLKMeshDeviceFixture,
       public testing::WithParamInterface<std::tuple<size_t, std::string>> {};
@@ -796,5 +889,21 @@ INSTANTIATE_TEST_SUITE_P(
     SingleCoreSfpuBinaryCompute,
     SingleCoreSingleMeshDeviceSfpuBinaryParameterizedFixture,
     ::testing::Values(std::make_tuple(1, "div_binary"), std::make_tuple(4, "div_binary")));
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarSfpuRelu_1Tile_SyncFull) {
+    run_quasar_sfpu_unpack_to_dest_fp32(this->devices_.at(0), /*num_tiles=*/1, "relu", /*dst_full_sync_en=*/true);
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarSfpuRelu_1Tile_SyncHalf) {
+    run_quasar_sfpu_unpack_to_dest_fp32(this->devices_.at(0), /*num_tiles=*/1, "relu", /*dst_full_sync_en=*/false);
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarSfpuRelu_4Tile_SyncFull) {
+    run_quasar_sfpu_unpack_to_dest_fp32(this->devices_.at(0), /*num_tiles=*/4, "relu", /*dst_full_sync_en=*/true);
+}
+
+TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarSfpuRelu_4Tile_SyncHalf) {
+    run_quasar_sfpu_unpack_to_dest_fp32(this->devices_.at(0), /*num_tiles=*/4, "relu", /*dst_full_sync_en=*/false);
+}
 
 }  // namespace tt::tt_metal

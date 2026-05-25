@@ -7,6 +7,7 @@
 #include <cstdint>
 
 #include "ckernel_trisc_common.h"
+#include "llk_sync.h"
 #include "llk_unpack_common.h"
 using namespace ckernel;
 
@@ -171,11 +172,31 @@ inline void _llk_unpack_unary_operand_reuse_dest_mop_config_(const std::uint32_t
  * stored in the buffer descriptor table, values = 0 - 16
  * @param num_tiles: number of tiles to unpack at a time for a single operand, default 1 tile of 32x32
  */
-template <std::uint32_t UNP_SEL, bool TRANSPOSE_EN, bool IS_32b_DEST_EN, EltwiseBinaryReuseDestType reuse_dest = EltwiseBinaryReuseDestType::NONE>
+template <
+    std::uint32_t UNP_SEL,
+    bool TRANSPOSE_EN,
+    bool IS_32b_DEST_EN,
+    EltwiseBinaryReuseDestType reuse_dest = EltwiseBinaryReuseDestType::NONE,
+    bool unpack_to_dest                   = false>
 inline void _llk_unpack_unary_operand_init_(
     const std::uint32_t buf_desc_id, const std::uint32_t num_tiles = NUM_TILES, const std::uint32_t num_faces = NUM_FACES)
 {
     static_assert(!(TRANSPOSE_EN && reuse_dest != EltwiseBinaryReuseDestType::NONE), "Transpose is not supported with reuse_dest");
+
+    // When unpack-to-dest is active for a 32-bit operand, route through UNP_DEST regardless of
+    // the requested UNP_SEL / TRANSPOSE_EN. Mirrors the BH primitive: the routing decision lives
+    // in the primitive so the LLK API can stay a thin pass-through. Format comes from the BD
+    // table (which the unpack-side configure has already populated for this buf_desc_id).
+    if constexpr (unpack_to_dest)
+    {
+        const std::uint32_t bd_format = ckernel::trisc::bd_table[buf_desc_id].f.format;
+        if (bd_format == (std::uint32_t)DataFormat::Float32 || bd_format == (std::uint32_t)DataFormat::Int32)
+        {
+            cfg_rmw(THCON_UNPACKER0_REG0_TRANSPOSE_RMW, 0 /*TRANSPOSE_EN forced false for UNP_DEST*/);
+            _llk_unpack_unary_operand_mop_config_<p_unpacr::UNP_DEST, IS_32b_DEST_EN>(buf_desc_id, num_tiles);
+            return;
+        }
+    }
 
     if constexpr (UNP_SEL == p_unpacr::UNP_A || UNP_SEL == p_unpacr::UNP_DEST)
     {
@@ -207,9 +228,41 @@ inline void _llk_unpack_unary_operand_init_(
  * @tparam reuse_dest: When not NONE, sets source counter for the CB unpacker only
  * @param l1_tile_idx: Index into the L1 buffer for a tile
  */
-template <std::uint32_t UNP_SEL, EltwiseBinaryReuseDestType reuse_dest = EltwiseBinaryReuseDestType::NONE>
-inline void _llk_unpack_unary_operand_(const std::uint32_t l1_tile_idx)
+template <std::uint32_t UNP_SEL, EltwiseBinaryReuseDestType reuse_dest = EltwiseBinaryReuseDestType::NONE, bool unpack_to_dest = false>
+inline void _llk_unpack_unary_operand_(const std::uint32_t l1_tile_idx, const std::uint32_t buf_desc_id = 0)
 {
+    // When unpack-to-dest is active for a 32-bit operand, unpack is the producer on UNPACK_MATH
+    // and drives the dest-side rendezvous itself. Mirrors the BH primitive — the wait/cfg/post
+    // sequence lives in the primitive so the LLK API stays a thin pass-through. Format is read
+    // from the BD table (populated by the unpack-side configure for this buf_desc_id).
+    if constexpr (unpack_to_dest)
+    {
+        const std::uint32_t bd_format = ckernel::trisc::bd_table[buf_desc_id].f.format;
+        if (bd_format == (std::uint32_t)DataFormat::Float32 || bd_format == (std::uint32_t)DataFormat::Int32)
+        {
+            // The math thread is the middleman with two single-counting semaphores (max=N each).
+            // Without an extra wait on MATH_PACK, unpack could race 2N iterations ahead of pack
+            // and overwrite a bank that pack has not read yet. Waiting on both keeps unpack
+            // within N iterations of pack.
+            _llk_sync_wait_<p_stall::STALL_UNPACK>(semaphore::MATH_PACK, p_stall::STALL_ON_MAX);
+            _llk_sync_wait_<p_stall::STALL_UNPACK>(semaphore::UNPACK_MATH, p_stall::STALL_ON_MAX);
+
+            // WH/BH-style address coupling: snoop math's SEC1 (math owns the bank pointer).
+            // Unpack no longer maintains its own dest_register_offset — eliminates the
+            // 3-state-machine drift bug seen in multi-tile SyncHalf transpose.
+            ckernel::trisc::cfg[DEST_TARGET_REG_CFG_MATH_SEC0_Offset_ADDR32] = ckernel::trisc::cfg[DEST_TARGET_REG_CFG_MATH_SEC1_Offset_ADDR32];
+
+            // UNP_DEST is driven off the UNP_A bank's counters.
+            TT_SET_SRC_TILE_FACE_ROW_IDX(p_set_inc_sel::TILE_SEL, p_unpacr::UNP_A, l1_tile_idx);
+            TTI_SET_DST_TILE_FACE_ROW_IDX(p_set_inc_sel::TILE_SEL, p_unpacr::UNP_A, 0);
+
+            // Drain UNPACK0 before posting "filled" so the post does not race the writes math reads.
+            ckernel::ckernel_template::run_bank0_sw_cntl(instrn_buffer);
+            _llk_sync_post_<p_stall::UNPACK0>(semaphore::UNPACK_MATH);
+            return;
+        }
+    }
+
     // RT: for the best performance, setting counters should be placed in a REPLAY buffer
     // in the mop_config, but for back compatibility with APIs, the counter functions must
     // be programmable with users input offset idx
