@@ -120,7 +120,7 @@ from tests.ttnn.utils_for_testing import comp_pcc
     ],
     indirect=["mesh_device", "device_params"],
 )
-@pytest.mark.parametrize("padded_percent", [0], ids=lambda p: f"pad{p}")
+@pytest.mark.parametrize("padded_percent", [50], ids=lambda p: f"pad{p}")
 def test_ttnn_moe(
     mesh_device,
     device_params,
