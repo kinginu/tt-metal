@@ -434,7 +434,7 @@ class TtMoe(LightweightModule):
 
         scores, indices, gate_logits = self.gate(
             ttnn.view(x, (x.shape[0] * x.shape[1], x.shape[2])),
-            num_real_tokens=actual_isl,
+            actual_isl=actual_isl,
             padding_side=padding_side,
         )
         signpost(header="moe_gate_calculate_dispatch_offsets")
