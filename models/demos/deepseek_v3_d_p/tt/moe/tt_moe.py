@@ -443,6 +443,7 @@ class TtMoe(LightweightModule):
             num_routed_experts=self.num_routed_experts,
             seq_len_per_chip=self.seq_len_per_chip,
             num_experts_per_tok=self.num_experts_per_tok,
+        )
 
         signpost(header="moe_gate_calculate_dispatch_offsets")
         gate_logits = (
