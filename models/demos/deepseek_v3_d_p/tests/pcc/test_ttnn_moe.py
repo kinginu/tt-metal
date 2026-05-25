@@ -120,6 +120,7 @@ from tests.ttnn.utils_for_testing import comp_pcc
     ],
     indirect=["mesh_device", "device_params"],
 )
+@pytest.mark.parametrize("padded_percent", [0], ids=lambda p: f"pad{p}")
 def test_ttnn_moe(
     mesh_device,
     device_params,
@@ -133,6 +134,7 @@ def test_ttnn_moe(
     num_links,
     topology,
     gate_fallback_mode,
+    padded_percent,
 ):
     """
     Test TtMoe PCC against TorchMoe reference.
@@ -281,6 +283,11 @@ def test_ttnn_moe(
     )
     profiler.end("input_creation")
 
+    if padded_percent > 0:
+        actual_isl = int(dispatch_group_size * seq_len_per_chip * (1 - padded_percent / 100))
+    else:
+        actual_isl = None
+
     # ========================================
     # Step 3: Run TorchMoe reference with intermediates
     # ========================================
@@ -346,7 +353,7 @@ def test_ttnn_moe(
     profiler.start("tt_forward")
     logger.debug("Running TtMoe forward pass...")
 
-    tt_output, tt_intermediates = tt_moe(tt_x, return_intermediates=True)
+    tt_output, tt_intermediates = tt_moe(tt_x, return_intermediates=True, actual_isl=actual_isl, padding_side="right")
     ttnn.synchronize_device(mesh_device)
     profiler.end("tt_forward")
 
