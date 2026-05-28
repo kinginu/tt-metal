@@ -145,7 +145,7 @@ jobs:
       - name: 🤖 AI job summary
         if: always() && !cancelled()
         continue-on-error: true
-        uses: tenstorrent/tt-github-actions/.github/actions/ai_summary/job@main
+        uses: tenstorrent/tt-github-actions/.github/actions/ai_summary/job@ppetrovic/ai-job-summary-killed
         with:
           config: |
             {
@@ -174,7 +174,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
       - id: ai-run-summary
         continue-on-error: true
-        uses: tenstorrent/tt-github-actions/.github/actions/ai_summary/run@main
+        uses: tenstorrent/tt-github-actions/.github/actions/ai_summary/run@ppetrovic/ai-job-summary-killed
         with:
           config: |
             {
