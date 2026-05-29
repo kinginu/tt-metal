@@ -17,15 +17,14 @@
  * LLK MATH COMMON
  *************************************************************************/
 
-inline bool llk_math_is_unpack_to_dest_32b(const std::uint32_t operand_id) {
+constexpr bool llk_math_is_unpack_to_dest_32b(const std::uint32_t operand_id) {
     const DataFormat unpack_dst_fmt = static_cast<DataFormat>(unpack_dst_format[operand_id]);
     return unpack_dst_fmt == DataFormat::Float32 || unpack_dst_fmt == DataFormat::Int32;
 }
 
-inline bool llk_math_has_unpack_to_dest_32b() {
+constexpr bool llk_math_has_unpack_to_dest_32b() {
     for (std::uint32_t operand_id = 0; operand_id < NUM_CIRCULAR_BUFFERS; ++operand_id) {
-        if (static_cast<DataFormat>(unpack_dst_format[operand_id]) != DataFormat::Invalid &&
-            llk_math_is_unpack_to_dest_32b(operand_id)) {
+        if (llk_math_is_unpack_to_dest_32b(operand_id)) {  // Invalid is neither Float32 nor Int32
             return true;
         }
     }
