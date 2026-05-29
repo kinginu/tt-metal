@@ -247,11 +247,6 @@ inline void _llk_unpack_unary_operand_(const std::uint32_t l1_tile_idx, const st
             _llk_sync_wait_<p_stall::STALL_UNPACK>(semaphore::MATH_PACK, p_stall::STALL_ON_MAX);
             _llk_sync_wait_<p_stall::STALL_UNPACK>(semaphore::UNPACK_MATH, p_stall::STALL_ON_MAX);
 
-            // WH/BH-style address coupling: snoop math's SEC1 (math owns the bank pointer).
-            // Unpack no longer maintains its own dest_register_offset — eliminates the
-            // 3-state-machine drift bug seen in multi-tile SyncHalf transpose.
-            ckernel::trisc::cfg[DEST_TARGET_REG_CFG_MATH_SEC0_Offset_ADDR32] = ckernel::trisc::cfg[DEST_TARGET_REG_CFG_MATH_SEC1_Offset_ADDR32];
-
             // UNP_DEST is driven off the UNP_A bank's counters.
             TT_SET_SRC_TILE_FACE_ROW_IDX(p_set_inc_sel::TILE_SEL, p_unpacr::UNP_A, l1_tile_idx);
             TTI_SET_DST_TILE_FACE_ROW_IDX(p_set_inc_sel::TILE_SEL, p_unpacr::UNP_A, 0);
