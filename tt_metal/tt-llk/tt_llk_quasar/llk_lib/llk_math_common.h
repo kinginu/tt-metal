@@ -145,7 +145,7 @@ inline void _llk_math_pack_sync_init_()
     };
 
     _reset_dest_register_offset_();
-    _set_dest_section_base_<TRISC_ID>(_get_dest_buffer_base_());
+    _set_dest_section_base_<DEST_SECTION_BASE_IDX>(_get_dest_buffer_base_());
 
     constexpr std::uint32_t num_sem = (DST == DstSync::SyncFull) ? 1 : 2;
     TTI_SEMINIT(num_sem, 0, 0, p_stall::SEMAPHORE_1);
@@ -165,6 +165,6 @@ inline void _llk_math_dest_section_done_()
         _update_dest_register_offset_<EN_32BIT_DEST>();
         std::uint32_t base_addr = _get_dest_buffer_base_();
         TTI_STALLWAIT(p_stall::STALL_CFG, 0, p_stall::MATH, p_stall::WAIT_SFPU);
-        _set_dest_section_base_<TRISC_ID>(base_addr);
+        _set_dest_section_base_<DEST_SECTION_BASE_IDX>(base_addr);
     }
 }
