@@ -20,9 +20,11 @@ on:
           - mochi
           - qwenimage
           - deepseek_v3
-          - tinyllama_1_1b_ddp32_shakespeare
-          - llama_8b_tp8_ddp4_shakespeare
-          - llama_8b_tp4_ddp8_shakespeare
+          # - tinyllama_1_1b_ddp32_shakespeare
+          # - llama_8b_tp8_ddp4_shakespeare
+          # - llama_8b_tp4_ddp8_shakespeare
+          - qwen3_1.7b_ddp32_shakespeare
+          - tiny_deepseek_v3_char_ddp32_shakespeare
 
       build-type:
         required: false
