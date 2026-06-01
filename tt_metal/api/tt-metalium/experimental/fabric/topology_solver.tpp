@@ -22,6 +22,7 @@
 #include <set>
 #include <sstream>
 #include <climits>   // For INT_MAX
+#include <cstdint>
 #include <cstddef>   // For SIZE_MAX
 #include <unordered_set>
 #include <map>
@@ -33,6 +34,7 @@
 #include <tt-logger/tt-logger.hpp>
 #include <tt_stl/assert.hpp>
 
+#include <fabric/topology_solver_sat_solver.hpp>
 #include <memory>
 
 namespace tt::tt_fabric {
@@ -1291,7 +1293,7 @@ void TopologyMappingEnumerationSession<TargetNode, GlobalNode>::reset() noexcept
     mode_ = ConnectionValidationMode::RELAXED;
     graph_data_.reset();
     constraint_data_.reset();
-    sat_session_.reset();
+    sat_solver_.reset();
     sat_enc_ = {};
 }
 
@@ -1338,12 +1340,15 @@ MappingResult<TargetNode, GlobalNode> TopologyMappingEnumerationSession<TargetNo
         }
 
         if (use_sat_) {
-            sat_session_ = detail::topology_sat_session_create_and_encode(
-                TopologySatGraphView(*graph_data_),
-                TopologySatConstraintView(*constraint_data_),
-                sat_enc_,
-                connection_validation_mode);
-            if (!sat_session_) {
+            sat_solver_ = std::make_unique<detail::TopologySatSolver>();
+            sat_solver_->configure_for_blocking_clause_enumeration();
+            sat_enc_ = {};
+            if (!topology_sat_encode_hard_constraints(
+                    *sat_solver_,
+                    TopologySatGraphView(*graph_data_),
+                    TopologySatConstraintView(*constraint_data_),
+                    sat_enc_,
+                    connection_validation_mode)) {
                 MappingResult<TargetNode, GlobalNode> failure;
                 failure.success = false;
                 failure.error_message = "TopologyMappingEnumerationSession: SAT hard encode failed";
@@ -1393,12 +1398,15 @@ MappingResult<TargetNode, GlobalNode> TopologyMappingEnumerationSession<TargetNo
 
     if (use_sat_) {
         if (excluded_idx.size() < sat_exclusions_encoded_) {
-            sat_session_ = detail::topology_sat_session_create_and_encode(
-                TopologySatGraphView(*graph_data_),
-                TopologySatConstraintView(*constraint_data_),
-                sat_enc_,
-                connection_validation_mode);
-            if (!sat_session_) {
+            sat_solver_ = std::make_unique<detail::TopologySatSolver>();
+            sat_solver_->configure_for_blocking_clause_enumeration();
+            sat_enc_ = {};
+            if (!topology_sat_encode_hard_constraints(
+                    *sat_solver_,
+                    TopologySatGraphView(*graph_data_),
+                    TopologySatConstraintView(*constraint_data_),
+                    sat_enc_,
+                    connection_validation_mode)) {
                 MappingResult<TargetNode, GlobalNode> failure;
                 failure.success = false;
                 failure.error_message = "TopologyMappingEnumerationSession: SAT re-encode failed";
@@ -1408,8 +1416,8 @@ MappingResult<TargetNode, GlobalNode> TopologyMappingEnumerationSession<TargetNo
             sat_exclusions_encoded_ = 0;
         }
         while (sat_exclusions_encoded_ < excluded_idx.size()) {
-            if (!detail::topology_sat_session_add_blocking_clause(
-                    sat_session_.get(), sat_enc_, excluded_idx[sat_exclusions_encoded_], unique_shapes)) {
+            if (!topology_sat_add_blocking_clause_for_mapping(
+                    *sat_solver_, sat_enc_, excluded_idx[sat_exclusions_encoded_], unique_shapes)) {
                 MappingResult<TargetNode, GlobalNode> failure;
                 failure.success = false;
                 failure.error_message =
@@ -1420,12 +1428,19 @@ MappingResult<TargetNode, GlobalNode> TopologyMappingEnumerationSession<TargetNo
         }
 
         ++sat_solve_calls_;
-        std::vector<int> raw;
-        if (!detail::topology_sat_session_solve_and_decode(sat_session_.get(), sat_enc_, raw)) {
+        const int status = sat_solver_->solve();
+        if (status != detail::TopologySatSolver::kSat) {
             MappingResult<TargetNode, GlobalNode> failure;
             failure.success = false;
             failure.error_message =
                 "TopologyMappingEnumerationSession: no new mapping found (all solutions exhausted or excluded)";
+            return failure;
+        }
+        std::vector<int> raw;
+        if (!topology_sat_decode_hard_solution(*sat_solver_, sat_enc_, raw)) {
+            MappingResult<TargetNode, GlobalNode> failure;
+            failure.success = false;
+            failure.error_message = "TopologyMappingEnumerationSession: SAT decode failed";
             return failure;
         }
         for (const auto& excl : excluded_idx) {
@@ -1581,8 +1596,25 @@ inline bool topology_mapping_should_use_sat_engine(
                     return false;
                 }
             }
-            static constexpr size_t kAutoSatMinAssignmentVars = 512;
-            return (n_target * n_global) >= kAutoSatMinAssignmentVars;
+            // Auto backend: prefer SAT when |T|×|G| exceeds a baseline (SAT amortizes encoding on large
+            // full-host mappings), but raise that baseline with *embedding slack* (|G|−|T|)/|T|. Extra global
+            // vertices inflate SAT variables/clauses while often staying irrelevant to an injective map;
+            // DFS prunes that cheaply. Algebraically λ/(1−λ) with λ=(|G|−|T|)/|G| equals slack/|T|.
+            if (n_target == 0 || n_global < n_target) {
+                return false;
+            }
+            static constexpr size_t kAutoSatMinAssignmentProductBase = 2048;
+            static constexpr size_t kAutoSatSlackPenaltyPerTargetNode =
+                7;  // scales threshold ~linearly in (|G|−|T|)/|T|; tuned so moderate slack stays DFS
+            const uint64_t assignment_product =
+                static_cast<uint64_t>(n_target) * static_cast<uint64_t>(n_global);
+            const uint64_t slack_nodes = static_cast<uint64_t>(n_global - n_target);
+            const uint64_t scaled_min_product_numerator =
+                kAutoSatMinAssignmentProductBase * (n_target + kAutoSatSlackPenaltyPerTargetNode * slack_nodes);
+            uint64_t raised_min_product = (scaled_min_product_numerator + n_target - 1) / n_target;
+            static constexpr uint64_t kAutoSatMinAssignmentProductCeiling = 512ull * 1024ull;
+            raised_min_product = std::min(raised_min_product, kAutoSatMinAssignmentProductCeiling);
+            return assignment_product >= raised_min_product;
         }
     }
     return false;
@@ -3770,6 +3802,21 @@ bool SatSearchEngine<TargetNode, GlobalNode>::search(
         validation_mode,
         quiet_mode,
         state_);
+}
+
+template <typename TargetNode, typename GlobalNode>
+bool topology_sat_encode_hard_constraints(
+    TopologySatSolver& solver,
+    const GraphIndexData<TargetNode, GlobalNode>& graph_data,
+    const ConstraintIndexData<TargetNode, GlobalNode>& constraint_data,
+    TopologySatHardEncoding& enc,
+    ConnectionValidationMode validation_mode = ConnectionValidationMode::RELAXED) {
+    return topology_sat_encode_hard_constraints(
+        solver,
+        TopologySatGraphView(graph_data),
+        TopologySatConstraintView(constraint_data),
+        enc,
+        validation_mode);
 }
 
 template <typename TargetNode, typename GlobalNode>
