@@ -1485,12 +1485,29 @@ def ace_step_five_hz_lm_bfloat8_weights_enabled() -> bool:
     return os.environ.get("ACE_STEP_LM_BFLOAT8_WEIGHTS", "0").lower() in ("1", "true", "yes", "on")
 
 
+def ace_step_lm_prefill_qkv_sweep_enabled() -> bool:
+    """Pin swept 5 Hz LM prefill attention matmuls (QKV 128×2048×4096, WO 128×2048×2048).
+
+    Default **on** — HiFi4/bf16 1D 8×4 w8 l1/dram/l1 (QKV) and l1/dram/ws (WO).  Keeps
+    ``accuracy_decoder_config`` (BF16 weights + HiFi4).  Disables with
+    ``ACE_STEP_LM_PREFILL_QKV_SWEEP=0``.
+    """
+    return os.environ.get("ACE_STEP_LM_PREFILL_QKV_SWEEP", "1").lower() not in ("0", "false", "no", "off")
+
+
+def ace_step_lm_prefill_wo_sweep_enabled() -> bool:
+    """Same gate as :func:`ace_step_lm_prefill_qkv_sweep_enabled` (WO pin ships together)."""
+    return ace_step_lm_prefill_qkv_sweep_enabled()
+
+
 def ace_step_lm_prefill_l1_enabled() -> bool:
     """Keep 5 Hz LM prefill activations in L1 (``ace_step_apply_qwen_prefill_l1``).
 
-    Default **off** — ``ACE_STEP_LM_PREFILL_L1=1`` can L1 circular-buffer clash on P150/BH
-    during prefill matmul (see ``qwen_prefill_l1``). Tracy harness sets ``1`` explicitly.
+    Default **off**, but **on** when :func:`ace_step_lm_prefill_qkv_sweep_enabled` (sweep winner uses
+    l1/dram/l1).  ``ACE_STEP_LM_PREFILL_L1=1`` can L1-clash on some hosts — Tracy sets it explicitly.
     """
+    if ace_step_lm_prefill_qkv_sweep_enabled():
+        return True
     return os.environ.get("ACE_STEP_LM_PREFILL_L1", "0").lower() in ("1", "true", "yes", "on")
 
 
@@ -1556,7 +1573,7 @@ def ace_step_five_hz_lm_optimizations(model_args: Any):
                 OpGroup.LI_FF1_FF3: MathFidelitySetting.HIFI2,
                 OpGroup.LI_FF2: MathFidelitySetting.HIFI2,
                 OpGroup.LI_QKV_DECODE: MathFidelitySetting.HIFI2,
-                OpGroup.LI_QKV_PREFILL: MathFidelitySetting.HIFI2,
+                OpGroup.LI_QKV_PREFILL: MathFidelitySetting.HIFI4,
                 OpGroup.SDPA_DECODE: MathFidelitySetting.HIFI2,
                 OpGroup.SDPA_PREFILL: MathFidelitySetting.HIFI2,
                 OpGroup.LI_O_DECODE: MathFidelitySetting.HIFI2,
@@ -1565,6 +1582,117 @@ def ace_step_five_hz_lm_optimizations(model_args: Any):
         }
     )
     return DecodersPrecision(model_args.n_layers, model_args.model_name, decoder_conf=conf)
+
+
+# Swept 5 Hz LM prefill attention matmuls at seq_len=128:
+# QKV 128×2048×4096 — HiFi4/bf16, 1D mcast_in0, 8×4, w8, out_subblock 2×2, l1/dram/l1 (~61 us BH).
+# WO  128×2048×2048 — HiFi4/bf16, 1D mcast_in0, 8×4, w8, out_subblock 1×2, l1/dram/ws (~32 us BH).
+_LM_PREFILL_QKV_SWEEP_KN = (2048, 4096)
+_LM_PREFILL_WO_SWEEP_KN = (2048, 2048)
+_LM_PREFILL_ATTN_SWEEP_M = 128
+_LM_PREFILL_ATTN_SWEEP_GRID = (8, 4)
+_LM_PREFILL_ATTN_SWEEP_IN0_BLOCK_W = 8
+
+
+def _lm_prefill_1d_mcast_program_config(
+    device: Any,
+    *,
+    seq_len: int,
+    k_dim: int,
+    n_dim: int,
+    batch_size: int = 1,
+    width_sharded_out: bool = False,
+):
+    """Shared 1D mcast pin builder for swept prefill attention linears."""
+    import ttnn
+
+    m = max(1, int(batch_size)) * max(1, int(seq_len))
+    if m != _LM_PREFILL_ATTN_SWEEP_M:
+        return None
+
+    cfg_cls = getattr(ttnn, "MatmulMultiCoreReuseMultiCast1DProgramConfig", None)
+    if cfg_cls is None or not hasattr(device, "compute_with_storage_grid_size"):
+        return None
+
+    gx, gy = _LM_PREFILL_ATTN_SWEEP_GRID
+    grid = device.compute_with_storage_grid_size()
+    if gx > int(grid.x) or gy > int(grid.y):
+        return None
+
+    tile = int(getattr(ttnn, "TILE_SIZE", 32))
+    mt = m // tile
+    kt = int(k_dim) // tile
+    nt = int(n_dim) // tile
+    cores = gx * gy
+    ibw = _LM_PREFILL_ATTN_SWEEP_IN0_BLOCK_W
+    if kt % ibw or nt % cores:
+        return None
+
+    per_core_n = nt // cores
+    if width_sharded_out:
+        sh, sw = 1, min(2, per_core_n)
+        while per_core_n % sw and sw > 1:
+            sw -= 1
+    else:
+        sh, sw = 2, 2
+        if mt % sh or per_core_n % sw:
+            sh, sw = 1, min(4, per_core_n)
+            while per_core_n % sw and sw > 1:
+                sw -= 1
+
+    return cfg_cls(
+        compute_with_storage_grid_size=ttnn.CoreCoord(gx, gy),
+        in0_block_w=ibw,
+        out_subblock_h=sh,
+        out_subblock_w=sw,
+        per_core_M=mt,
+        per_core_N=per_core_n,
+        fuse_batch=True,
+        fused_activation=None,
+        mcast_in0=True,
+    )
+
+
+def ace_step_lm_prefill_qkv_matmul_program_config(
+    device: Any,
+    *,
+    seq_len: int,
+    hidden_dim: int,
+    qkv_dim: int,
+    batch_size: int = 1,
+):
+    """Pinned 1D program config for the swept prefill QKV matmul, else ``None``."""
+    if (int(hidden_dim), int(qkv_dim)) != _LM_PREFILL_QKV_SWEEP_KN:
+        return None
+    return _lm_prefill_1d_mcast_program_config(
+        device,
+        seq_len=seq_len,
+        k_dim=int(hidden_dim),
+        n_dim=int(qkv_dim),
+        batch_size=batch_size,
+        width_sharded_out=False,
+    )
+
+
+def ace_step_lm_prefill_wo_matmul_program_config(
+    device: Any,
+    *,
+    seq_len: int,
+    k_dim: int,
+    n_dim: int,
+    batch_size: int = 1,
+):
+    """Pinned 1D program config for the swept prefill WO matmul (l1/dram/ws), else ``None``."""
+    if (int(k_dim), int(n_dim)) != _LM_PREFILL_WO_SWEEP_KN:
+        return None
+    return _lm_prefill_1d_mcast_program_config(
+        device,
+        seq_len=seq_len,
+        k_dim=int(k_dim),
+        n_dim=int(n_dim),
+        batch_size=batch_size,
+        width_sharded_out=True,
+    )
 
 
 def ace_step_init_dit_rmsnorm_compute_kernel_config(device: Any):

@@ -85,13 +85,12 @@ consumers (sampling, repetition-penalty, CFG combine) keep working unchanged.
 
 **PCC / accuracy**
 
-Default path uses ``accuracy_decoder_config.json`` (**BF16** weights + HiFi4) when
-:func:`~math_perf_env.ace_step_five_hz_lm_bfloat8_weights_enabled` is false — prefill last-token
-PCC typically **~0.984** vs HuggingFace on P150.
-
-Set ``ACE_STEP_LM_BFLOAT8_WEIGHTS=1`` for HiFi2 + ``bfloat8_b`` decoder weights (lower DRAM BW,
-faster matmuls; HF logits PCC ~**0.90**). Embedding / ``lm_head`` dtype follows
-``create_tt_model`` (``bfloat16`` by default, ``bfloat8_b`` when the BFP8 env is set).
+Default path uses swept prefill attention matmul program configs (HiFi4 + BF16):
+QKV 128×2048×4096 (1D 8×4 w8 l1/dram/l1) and WO 128×2048×2048 (1D 8×4 w8 l1/dram/ws)
+via :func:`~math_perf_env.ace_step_lm_prefill_qkv_sweep_enabled` (default on).
+Set ``ACE_STEP_LM_PREFILL_QKV_SWEEP=0`` to restore stock ``get_attn_qkv_program_config``.
+Explicit ``ACE_STEP_LM_BFLOAT8_WEIGHTS=1`` opts into HiFi2 + ``bfloat8_b`` weights without
+the pinned program config (unless sweep is also on).
 """
 
 from __future__ import annotations
@@ -114,6 +113,7 @@ from models.demos.ace_step_v1_5.ttnn_impl.math_perf_env import (
     ace_step_lm_head_sharded_norm_enabled,
     ace_step_lm_narrow_audio_vocab_enabled,
     ace_step_lm_prefill_l1_enabled,
+    ace_step_lm_prefill_qkv_sweep_enabled,
     ace_step_lm_sdpa_concat_width_enabled,
     ace_step_lm_unified_decode_shard_enabled,
 )
@@ -123,6 +123,9 @@ from models.demos.ace_step_v1_5.ttnn_impl.qwen_decode_shard import ace_step_patc
 from models.demos.ace_step_v1_5.ttnn_impl.qwen_lm_head_sharded_norm import ace_step_apply_lm_head_sharded_norm
 from models.demos.ace_step_v1_5.ttnn_impl.qwen_prefill_l1 import (
     ace_step_apply_qwen_prefill_l1,
+    ace_step_patch_model_args_lm_prefill_qkv_matmul,
+    ace_step_patch_model_args_lm_prefill_wo_matmul,
+    ace_step_promote_attention_wqkv_to_dram_interleaved,
     ace_step_qwen_prefill_l1_op_context,
 )
 from models.tt_transformers.tt.common import (
@@ -225,15 +228,14 @@ class QwenModelTtTransformers:
         # finds the right config / weights. Revert immediately after construction so other
         # ACE-Step components that read ``HF_MODEL`` aren't affected.
         with _hf_model_env(model_name):
+            _bf8_weights = ace_step_five_hz_lm_bfloat8_weights_enabled()
             if dtype is not None:
                 tt_dtype = dtype
-            elif ace_step_five_hz_lm_bfloat8_weights_enabled():
+            elif _bf8_weights:
                 tt_dtype = ttnn.bfloat8_b
             else:
                 tt_dtype = ttnn.bfloat16
-            lm_optimizations = (
-                ace_step_five_hz_lm_optimizations if ace_step_five_hz_lm_bfloat8_weights_enabled() else None
-            )
+            lm_optimizations = ace_step_five_hz_lm_optimizations if _bf8_weights else None
             (
                 self.model_args,
                 self.tt_model,
@@ -252,6 +254,10 @@ class QwenModelTtTransformers:
 
         if ace_step_lm_prefill_l1_enabled():
             ace_step_apply_qwen_prefill_l1(self.tt_model, self.model_args)
+        if ace_step_lm_prefill_qkv_sweep_enabled():
+            ace_step_patch_model_args_lm_prefill_qkv_matmul(self.model_args, device)
+            ace_step_patch_model_args_lm_prefill_wo_matmul(self.model_args, device)
+            ace_step_promote_attention_wqkv_to_dram_interleaved(self.tt_model)
         if ace_step_lm_unified_decode_shard_enabled():
             ace_step_patch_model_args_decode_unified_shard(self.model_args)
         if ace_step_lm_sdpa_concat_width_enabled():
