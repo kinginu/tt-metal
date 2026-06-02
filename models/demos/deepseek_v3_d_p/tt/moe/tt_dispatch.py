@@ -78,9 +78,8 @@ class TtDispatchModule(LightweightModule):
             experts_per_chip: Number of experts hosted on each destination device.
             num_routed_experts: Total number of routed experts across all devices.
             num_experts_per_tok: Number of experts each token is routed to (top-k).
-            metadata_len: Number of fields in per-token metadata. The kernel writes 5
-                (chip, token, topk_idx, routed_expert, weight); any extra fields are
-                zero-padded.
+            metadata_len: Number of fields in per-token metadata (currently 5:
+                chip, token, topk_idx, routed_expert, weight).
             max_dispatch_buffer_token_size: Total token capacity of the flat dispatch
                 buffer per chip. Tokens that would push the total past this cap are
                 silently dropped by the kernel (prevents out-of-bounds DRAM writes).
@@ -115,6 +114,8 @@ class TtDispatchModule(LightweightModule):
         self.topology = topology
         self.fp8_output = fp8_output
         self.subdevice_id = subdevice_id
+        if num_untilizers_per_sender < 1:
+            raise ValueError(f"num_untilizers_per_sender must be >= 1; got {num_untilizers_per_sender}")
         self.num_untilizers_per_sender = num_untilizers_per_sender
 
     @staticmethod
