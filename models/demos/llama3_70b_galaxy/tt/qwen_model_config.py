@@ -312,7 +312,18 @@ class TtQwenModelArgs(TtModelArgs):
             )
         default_links = 2 if self.is_blackhole else 4
         self.model_config["GALAXY_NUM_LINKS"] = int(os.getenv("GALAXY_NUM_LINKS", str(default_links)))
-        self.model_config["CCL_TOPOLOGY"] = ttnn.Topology.Linear if self.is_blackhole else ttnn.Topology.Ring
+        # When a ring/torus fabric is selected (QWEN_USE_RING_FABRIC=1 or QWEN_FABRIC=*ring*/*torus*),
+        # each cluster axis forms a ring, so the on-device collectives must use Ring topology to match
+        # the fabric routing. Using Linear topology on a ring/torus fabric leaves the cross-axis route
+        # unmapped (IndexError: map::at).
+        _qwen_fabric = os.getenv("QWEN_FABRIC", "").strip().lower()
+        _qwen_ring_like = (
+            os.getenv("QWEN_USE_RING_FABRIC", "0") == "1" or "ring" in _qwen_fabric or "torus" in _qwen_fabric
+        )
+        if _qwen_ring_like:
+            self.model_config["CCL_TOPOLOGY"] = ttnn.Topology.Ring
+        else:
+            self.model_config["CCL_TOPOLOGY"] = ttnn.Topology.Linear if self.is_blackhole else ttnn.Topology.Ring
         if device is not None:
             self.n_local_heads = self.n_heads // self.cluster_shape[1]
 
