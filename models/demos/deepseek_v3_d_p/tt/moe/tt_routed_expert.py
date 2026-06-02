@@ -400,11 +400,29 @@ class TtRoutedExpert(LightweightModule):
             output=out,
         )
 
+    def _effective_max_tokens(self, actual_isl: int = None) -> int:
+        """
+        Per-expert row bound for the extract -> FFN -> insert loop.
+
+        A single expert can receive at most one entry per real token, so the number of
+        real (non-padded) tokens in the dispatch group (``actual_isl``) is a provably-safe
+        upper bound on any expert's token count. When it is smaller than the worst-case
+        ``self.max_tokens`` (= dispatch_group_size * seq_len_per_chip), using it shrinks the
+        extract output and therefore the FFN matmul M dimension with no risk of dropping
+        tokens. The value is tile-aligned (extract requires a multiple of TILE_SIZE) and
+        clamped to the provisioned maximum.
+        """
+        if actual_isl is None:
+            return self.max_tokens
+        bound = ((actual_isl + ttnn.TILE_SIZE - 1) // ttnn.TILE_SIZE) * ttnn.TILE_SIZE
+        return min(self.max_tokens, max(ttnn.TILE_SIZE, bound))
+
     def forward(
         self,
         dispatched_buffer: ttnn.Tensor,
         expert_token_counts: ttnn.Tensor,
         expert_region_offsets: ttnn.Tensor,
+        actual_isl: int = None,
     ) -> ttnn.Tensor:
         """
         Blackhole forward implementation using narrow and in-place writes.
@@ -422,11 +440,19 @@ class TtRoutedExpert(LightweightModule):
             expert_region_offsets: Expert region start offsets per expert
                 (shared across source devices in a dispatch group). Produced by
                 offset_cumsum. Shape per device: (1, num_routed_experts).
+            actual_isl: Number of real (non-padded) tokens in the dispatch group. When
+                provided, bounds the per-expert extract/FFN row count to
+                tile_align(actual_isl) instead of the worst-case ``self.max_tokens``,
+                shrinking the FFN matmul for padded sequences (no tokens are dropped).
 
         Returns:
             expert_outputs: Expert output tensor, same shape as dispatched_buffer
         """
         logger.debug(f"Forward pass: dispatched_buffer shape={dispatched_buffer.shape}")
+
+        # Per-expert row bound for this call (padding-aware when actual_isl is known).
+        ffn_max_tokens = self._effective_max_tokens(actual_isl)
+        logger.debug(f"Forward pass: actual_isl={actual_isl}, ffn_max_tokens={ffn_max_tokens} (max={self.max_tokens})")
 
         # Convert input to activations dtype if needed
         if dispatched_buffer.dtype != self.activations_dtype:
@@ -450,7 +476,7 @@ class TtRoutedExpert(LightweightModule):
                 expert_token_counts,
                 self.global_expert_idx_table,
                 local_expert_id=local_expert,
-                max_dispatched_tokens_per_expert=self.max_tokens,
+                max_dispatched_tokens_per_expert=ffn_max_tokens,
             )
             logger.debug(f"Expert {local_expert}: input shape {tokens.shape}")
 
