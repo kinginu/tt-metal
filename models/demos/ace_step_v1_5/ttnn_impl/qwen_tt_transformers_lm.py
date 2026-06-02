@@ -305,26 +305,22 @@ class QwenModelTtTransformers:
     # ------------------------------------------------------------------
 
     def reset_kv_cache(self) -> None:
-        """Reset paged KV state by re-initializing per-layer paged buffers and reshuffling the page table.
+        """Reset paged KV state by reshuffling the page table and zeroing the cursor.
 
-        The simplest correct reset for a single-user paged setup is to drop the existing block
-        contents (they will be overwritten on next prefill anyway, since paged_fill_cache writes
-        to whichever blocks the page_table addresses) and zero the cursor. We also reshuffle the
-        page table so a stale `current_pos` cannot accidentally point at valid old data.
+        The KV buffers are allocated once at construction (``Attention.init_kv_cache`` runs in
+        the layer constructors). We deliberately do **not** re-allocate them here: ``paged_fill_cache``
+        overwrites whichever blocks the page table addresses on the next prefill, and decode fills
+        the remaining positions incrementally, so the previous contents are never read. Reshuffling
+        the page table additionally prevents a stale ``current_pos`` from pointing at valid old data.
+
+        Re-allocating per reset used to dominate device time: ``init_kv_cache`` builds the cache from
+        ``torch.zeros`` (FP32) and converts to bf16 TILE on device, i.e. a Tilize (FP32=>FP32) plus
+        Typecast (FP32=>BF16) over a multi-MB DRAM buffer, ×2 (K,V) ×every layer, on every prefill.
         """
         self._cursor = 0
         self._page_table_torch = _make_page_table(self.model_args.max_batch_size, self._paged_cfg)
-        # Re-init paged KV blocks in place. ``Attention.init_kv_cache`` allocates fresh ttnn
-        # tensors; we then rebuild ``tt_kv_cache`` so the in-flight reference matches.
-        for layer in self.tt_model.layers:
-            attn = layer.attention
-            if hasattr(attn, "init_kv_cache"):
-                try:
-                    attn.init_kv_cache(self.model_args, None)
-                except Exception:
-                    # init_kv_cache raises if paged_attention_config isn't on the Attention.
-                    # That path means there's nothing to reset anyway.
-                    pass
+        # KV buffers were allocated once at construction; paged_fill_cache overwrites
+        # the addressed blocks on the next prefill, so no re-allocation is needed.
         self.tt_kv_cache = [layer.attention.layer_past for layer in self.tt_model.layers]
         self.release_trace()
 
