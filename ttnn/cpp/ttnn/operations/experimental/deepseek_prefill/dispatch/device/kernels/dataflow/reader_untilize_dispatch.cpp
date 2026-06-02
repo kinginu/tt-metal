@@ -273,8 +273,8 @@ void kernel_main() {
         }
 
         for (uint32_t t = 0; t < batch_count; t++) {
-            tt_l1_ptr int32_t* indices_t =
-                reinterpret_cast<tt_l1_ptr int32_t*>(indices_base + t * aligned_indices_page_size);
+            tt_l1_ptr uint16_t* indices_t =
+                reinterpret_cast<tt_l1_ptr uint16_t*>(indices_base + t * aligned_indices_page_size);
             tt_l1_ptr uint16_t* weights_t =
                 reinterpret_cast<tt_l1_ptr uint16_t*>(weights_base + t * aligned_weights_page_size);
             uint32_t token_idx = batch_start + t;
