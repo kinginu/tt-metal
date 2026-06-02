@@ -20,7 +20,12 @@ import ttnn
 from models.tt_transformers.tt.common import Mode
 
 from .math_perf_env import (
+    _LM_PREFILL_MLP_FF1_SWEEP_KN,
+    ace_step_ensure_dram_activation,
     ace_step_linear_l1_memory_config,
+    ace_step_lm_prefill_mlp_ff1_l1_activations_enabled,
+    ace_step_lm_prefill_mlp_ff1_matmul_program_config,
+    ace_step_lm_prefill_mlp_ff1_sweep_enabled,
     ace_step_lm_prefill_qkv_matmul_program_config,
     ace_step_lm_prefill_qkv_sweep_enabled,
     ace_step_lm_prefill_wo_matmul_program_config,
@@ -81,6 +86,113 @@ def _ensure_l1_first_arg(args: tuple, *, l1_mc: Any) -> tuple:
     if not args:
         return args
     return (_ensure_l1_arg(args[0], l1_mc=l1_mc),) + args[1:]
+
+
+def _ensure_dram_first_arg(args: tuple, *, dram_mc: Any) -> tuple:
+    if not args:
+        return args
+    return (ace_step_ensure_dram_activation(ttnn, args[0], dram_mc),) + args[1:]
+
+
+def _tensor_memory_layout(tensor: Any) -> Any | None:
+    try:
+        return tensor.memory_config().memory_layout
+    except Exception:
+        return None
+
+
+def _promote_in0_to_l1_interleaved(tensor: Any, *, l1_mc: Any) -> Any:
+    """Width-sharded SwiGLU output (FF2 in0) must be L1 interleaved for stock 2D matmul."""
+    interleaved = ttnn.TensorMemoryLayout.INTERLEAVED
+    if _tensor_memory_layout(tensor) == interleaved:
+        return tensor
+    try:
+        if tensor.memory_config().is_sharded():
+            return ttnn.sharded_to_interleaved(tensor, l1_mc)
+    except Exception:
+        pass
+    return ttnn.to_memory_config(tensor, l1_mc)
+
+
+def _is_mlp_ff2_down_linear_args(args: tuple) -> bool:
+    """True for prefill down-proj: in0 [*,*,M,6144] x w2 [*,*,6144,2048]."""
+    if len(args) < 2:
+        return False
+    a, b = args[0], args[1]
+    if not (hasattr(a, "shape") and hasattr(b, "shape")):
+        return False
+    try:
+        _, ff1_n = _LM_PREFILL_MLP_FF1_SWEEP_KN
+        return len(a.shape) == 4 and len(b.shape) == 4 and int(a.shape[-1]) == ff1_n and int(b.shape[-2]) == ff1_n
+    except Exception:
+        return False
+
+
+def _is_mlp_ff1_gate_up_linear_args(args: tuple) -> bool:
+    """True for prefill gate/up: in0 [*,*,M,2048] x w1/w3 [*,*,2048,6144]."""
+    if len(args) < 2:
+        return False
+    a, b = args[0], args[1]
+    if not (hasattr(a, "shape") and hasattr(b, "shape")):
+        return False
+    try:
+        k_dim, n_dim = _LM_PREFILL_MLP_FF1_SWEEP_KN
+        return (
+            len(a.shape) == 4
+            and len(b.shape) >= 2
+            and int(a.shape[-1]) == k_dim
+            and int(b.shape[-2]) == k_dim
+            and int(b.shape[-1]) == n_dim
+        )
+    except Exception:
+        return False
+
+
+def _is_stock_2d_mcast_program_config(program_config: Any) -> bool:
+    cfg_cls = getattr(ttnn, "MatmulMultiCoreReuseMultiCastProgramConfig", None)
+    return program_config is not None and cfg_cls is not None and isinstance(program_config, cfg_cls)
+
+
+def _is_dram_sharded_linear_program_config(program_config: Any) -> bool:
+    """LM head / decode DRAM-sharded matmul — must keep width-sharded in0 and caller memcfg."""
+    for name in (
+        "MatmulMultiCoreReuseMultiCastDRAMShardedProgramConfig",
+        "MatmulMultiCoreReuseMultiCastBatchedDRAMShardedProgramConfig",
+    ):
+        cfg_cls = getattr(ttnn, name, None)
+        if cfg_cls is not None and isinstance(program_config, cfg_cls):
+            return True
+    return False
+
+
+def _ensure_interleaved_if_sharded_in0(args: tuple, *, l1_mc: Any, program_config: Any) -> tuple:
+    """Stock 2D prefill matmuls (e.g. FF2 after ws gate/up) require interleaved in0."""
+    if _is_dram_sharded_linear_program_config(program_config):
+        return args
+    if not args:
+        return args
+    t = args[0]
+    if not hasattr(t, "memory_config"):
+        return args
+
+    cfg_1d = getattr(ttnn, "MatmulMultiCoreReuseMultiCast1DProgramConfig", None)
+    if program_config is not None and cfg_1d is not None and isinstance(program_config, cfg_1d):
+        if getattr(program_config, "mcast_in0", False) and getattr(program_config, "fuse_batch", False):
+            return args
+
+    interleaved = ttnn.TensorMemoryLayout.INTERLEAVED
+    layout = _tensor_memory_layout(t)
+    is_ff2 = _is_mlp_ff2_down_linear_args(args)
+    if layout == interleaved and not is_ff2:
+        return args
+
+    if is_ff2 or _is_stock_2d_mcast_program_config(program_config) or layout != interleaved:
+        try:
+            if layout != interleaved or is_ff2:
+                return (_promote_in0_to_l1_interleaved(t, l1_mc=l1_mc),) + args[1:]
+        except Exception:
+            pass
+    return args
 
 
 def _patch_lru_cached_getter(model_args: Any, name: str, *, dram_mc: Any, l1_mc: Any) -> None:
@@ -186,6 +298,43 @@ def ace_step_patch_model_args_lm_prefill_wo_matmul(model_args: Any, device: Any)
     setattr(model_args, name, patched)
 
 
+def ace_step_patch_model_args_lm_prefill_mlp_ff1_matmul(model_args: Any, device: Any) -> None:
+    """Replace ``get_mlp_ff1_3_prg_config`` prefill path with the swept 128×2048×6144 pin."""
+    if not ace_step_lm_prefill_mlp_ff1_sweep_enabled():
+        return
+    name = "get_mlp_ff1_3_prg_config"
+    if not hasattr(model_args, name):
+        return
+
+    original: Callable = getattr(model_args, name)
+    if hasattr(original, "cache_clear"):
+        original.cache_clear()
+
+    cluster_shape = getattr(model_args, "cluster_shape", (1, 1))
+    k_dim = int(getattr(model_args, "dim", 0)) // int(cluster_shape[0])
+    n_dim = int(getattr(model_args, "hidden_dim", 0)) // int(cluster_shape[1])
+
+    @functools.wraps(original)
+    def patched(mode, seq_len: int = 1, prefetcher=None):
+        if not ace_step_lm_prefill_mlp_ff1_l1_activations_enabled():
+            return original(mode, seq_len, prefetcher)
+        if mode == Mode.PREFILL and prefetcher is None and int(seq_len) <= 128:
+            pc = ace_step_lm_prefill_mlp_ff1_matmul_program_config(
+                device,
+                seq_len=int(seq_len),
+                k_dim=k_dim,
+                n_dim=n_dim,
+            )
+            if pc is not None:
+                return pc
+        return original(mode, seq_len, prefetcher)
+
+    if hasattr(original, "cache_clear"):
+        patched = functools.lru_cache(maxsize=None)(patched)  # type: ignore[assignment]
+
+    setattr(model_args, name, patched)
+
+
 def _promote_attention_weight_to_dram_interleaved(weight: Any):
     dram = ttnn.DRAM_MEMORY_CONFIG
     interleaved = ttnn.TensorMemoryLayout.INTERLEAVED
@@ -204,20 +353,34 @@ def _promote_attention_weight_to_dram_interleaved(weight: Any):
     )
 
 
+def _layer_mlp_module(layer: Any) -> Any | None:
+    """Return the decoder MLP module (``feed_forward`` in ``tt_transformers``)."""
+    return getattr(layer, "feed_forward", None) or getattr(layer, "mlp", None)
+
+
 def ace_step_promote_attention_wqkv_to_dram_interleaved(tt_model: Any) -> None:
-    """Install DRAM-interleaved QKV/WO weights for swept prefill pins; keep sharded weights for decode."""
+    """Install DRAM-interleaved copies for swept prefill pins; keep sharded weights for decode."""
     if not ace_step_lm_prefill_qkv_sweep_enabled():
         return
     for layer in getattr(tt_model, "layers", ()):
         attn = getattr(layer, "attention", None)
-        if attn is None:
-            continue
-        if hasattr(attn, "wqkv") and getattr(attn, "wqkv_prefill_interleaved", None) is None:
-            attn.wqkv_prefill_interleaved = _promote_attention_weight_to_dram_interleaved(attn.wqkv)
-        if ace_step_lm_prefill_wo_sweep_enabled() and hasattr(attn, "wo"):
-            if getattr(attn, "wo_prefill_interleaved", None) is None:
-                attn.wo_prefill_interleaved = _promote_attention_weight_to_dram_interleaved(attn.wo)
-        _patch_attention_prefill_sweep_weights(attn)
+        if attn is not None:
+            if hasattr(attn, "wqkv") and getattr(attn, "wqkv_prefill_interleaved", None) is None:
+                attn.wqkv_prefill_interleaved = _promote_attention_weight_to_dram_interleaved(attn.wqkv)
+            if ace_step_lm_prefill_wo_sweep_enabled() and hasattr(attn, "wo"):
+                if getattr(attn, "wo_prefill_interleaved", None) is None:
+                    attn.wo_prefill_interleaved = _promote_attention_weight_to_dram_interleaved(attn.wo)
+            _patch_attention_prefill_sweep_weights(attn)
+
+        if ace_step_lm_prefill_mlp_ff1_sweep_enabled():
+            mlp = _layer_mlp_module(layer)
+            if mlp is None:
+                continue
+            if hasattr(mlp, "w1") and getattr(mlp, "w1_prefill_interleaved", None) is None:
+                mlp.w1_prefill_interleaved = _promote_attention_weight_to_dram_interleaved(mlp.w1)
+            if hasattr(mlp, "w3") and getattr(mlp, "w3_prefill_interleaved", None) is None:
+                mlp.w3_prefill_interleaved = _promote_attention_weight_to_dram_interleaved(mlp.w3)
+            _patch_mlp_prefill_sweep_weights(mlp)
 
 
 def _patch_attention_prefill_sweep_weights(attn: Any) -> None:
@@ -249,6 +412,35 @@ def _patch_attention_prefill_sweep_weights(attn: Any) -> None:
     attn._ace_step_prefill_sweep_patched = True
 
 
+def _patch_mlp_prefill_sweep_weights(mlp: Any) -> None:
+    """Swap ``w1`` / ``w3`` to interleaved DRAM copies for prefill (seq_len <= 128); decode keeps sharded."""
+    if getattr(mlp, "_ace_step_prefill_sweep_patched", False):
+        return
+    w1_prefill = getattr(mlp, "w1_prefill_interleaved", None)
+    w1_decode = getattr(mlp, "w1", None)
+    w3_prefill = getattr(mlp, "w3_prefill_interleaved", None)
+    w3_decode = getattr(mlp, "w3", None)
+    orig_forward = mlp.forward
+
+    def forward(x, mode, *args, **kwargs):
+        seq_len = int(x.shape[-2])
+        use_prefill_weights = mode == Mode.PREFILL and seq_len <= 128
+        if use_prefill_weights and w1_prefill is not None:
+            mlp.w1 = w1_prefill
+        if use_prefill_weights and w3_prefill is not None:
+            mlp.w3 = w3_prefill
+        try:
+            return orig_forward(x, mode, *args, **kwargs)
+        finally:
+            if use_prefill_weights and w1_decode is not None:
+                mlp.w1 = w1_decode
+            if use_prefill_weights and w3_decode is not None:
+                mlp.w3 = w3_decode
+
+    mlp.forward = forward  # type: ignore[method-assign]
+    mlp._ace_step_prefill_sweep_patched = True
+
+
 def _patch_attention_prefill_interleaved_wqkv(attn: Any) -> None:
     """Deprecated alias — use :func:`_patch_attention_prefill_sweep_weights`."""
     _patch_attention_prefill_sweep_weights(attn)
@@ -260,6 +452,18 @@ def _is_lm_prefill_wo_1d_mcast_program_config(program_config: Any) -> bool:
         return False
     return (
         int(getattr(program_config, "per_core_N", -1)) == 2 and int(getattr(program_config, "out_subblock_h", -1)) == 1
+    )
+
+
+def _is_lm_prefill_mlp_ff1_1d_mcast_program_config(program_config: Any) -> bool:
+    """True for the swept MLP gate/up pin (1D mcast, ``in0_block_w=4``, ``per_core_N=6``, subblock 1×3)."""
+    if not _is_lm_prefill_1d_mcast_program_config(program_config):
+        return False
+    return (
+        int(getattr(program_config, "in0_block_w", -1)) == 4
+        and int(getattr(program_config, "per_core_N", -1)) == 6
+        and int(getattr(program_config, "out_subblock_h", -1)) == 1
+        and int(getattr(program_config, "out_subblock_w", -1)) == 3
     )
 
 
@@ -436,7 +640,11 @@ def ace_step_qwen_prefill_l1_op_context() -> Iterator[None]:
         return wrapper
 
     def _wrap_l1_linear(fn: Callable) -> Callable:
-        """QKV: L1 ``in0`` + L1 interleaved out; WO: L1 ``in0`` + L1 width-sharded out then s2i."""
+        """QKV: L1 in0 + L1 interleaved out; WO/MLP ff1: L1 in0 + L1 width-sharded out (WO then s2i)."""
+        mlp_ff1_ws_mc = ttnn.MemoryConfig(
+            memory_layout=ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+            buffer_type=ttnn.BufferType.L1,
+        )
 
         @functools.wraps(fn)
         def wrapper(*args, **kwargs):
@@ -445,11 +653,22 @@ def ace_step_qwen_prefill_l1_op_context() -> Iterator[None]:
             if _is_lm_prefill_qkv_1d_mcast_program_config(pc):
                 args = _ensure_l1_first_arg(args, l1_mc=l1_mc)
                 _swap_dram_kwarg(kwargs, dram_mc=dram_mc, l1_mc=l1_mc)
+            elif _is_lm_prefill_mlp_ff1_1d_mcast_program_config(pc) or _is_mlp_ff1_gate_up_linear_args(args):
+                if ace_step_lm_prefill_mlp_ff1_l1_activations_enabled():
+                    args = _ensure_l1_first_arg(args, l1_mc=l1_mc)
+                    kwargs["memory_config"] = mlp_ff1_ws_mc
+                else:
+                    args = _ensure_dram_first_arg(args, dram_mc=dram_mc)
+                    if dram_mc is not None:
+                        kwargs["memory_config"] = dram_mc
             elif _is_lm_prefill_wo_1d_mcast_program_config(pc):
                 args = _ensure_l1_first_arg(args, l1_mc=l1_mc)
                 if ws_mc is not None:
                     kwargs["memory_config"] = ws_mc
+            elif _is_dram_sharded_linear_program_config(pc):
+                pass
             else:
+                args = _ensure_interleaved_if_sharded_in0(args, l1_mc=l1_mc, program_config=pc)
                 _swap_dram_kwarg(kwargs, dram_mc=dram_mc, l1_mc=l1_mc)
             out = fn(*args, **kwargs)
             if _is_lm_prefill_wo_1d_mcast_program_config(pc) and hasattr(out, "memory_config"):
@@ -536,6 +755,7 @@ def ace_step_qwen_prefill_l1_op_context() -> Iterator[None]:
 
 __all__ = [
     "ace_step_apply_qwen_prefill_l1",
+    "ace_step_patch_model_args_lm_prefill_mlp_ff1_matmul",
     "ace_step_patch_model_args_lm_prefill_qkv_matmul",
     "ace_step_patch_model_args_lm_prefill_wo_matmul",
     "ace_step_patch_model_args_prefill_l1",

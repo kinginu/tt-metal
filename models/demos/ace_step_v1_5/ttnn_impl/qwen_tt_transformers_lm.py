@@ -116,6 +116,7 @@ from models.demos.ace_step_v1_5.ttnn_impl.math_perf_env import (
     ace_step_lm_prefill_qkv_sweep_enabled,
     ace_step_lm_sdpa_concat_width_enabled,
     ace_step_lm_unified_decode_shard_enabled,
+    ace_step_set_lm_prefill_trace_active,
 )
 from models.demos.ace_step_v1_5.ttnn_impl.qwen_decode_qk_norm import ace_step_apply_qwen_decode_qk_norm
 from models.demos.ace_step_v1_5.ttnn_impl.qwen_decode_sdpa_layout import ace_step_patch_model_args_sdpa_gather_unified
@@ -123,6 +124,7 @@ from models.demos.ace_step_v1_5.ttnn_impl.qwen_decode_shard import ace_step_patc
 from models.demos.ace_step_v1_5.ttnn_impl.qwen_lm_head_sharded_norm import ace_step_apply_lm_head_sharded_norm
 from models.demos.ace_step_v1_5.ttnn_impl.qwen_prefill_l1 import (
     ace_step_apply_qwen_prefill_l1,
+    ace_step_patch_model_args_lm_prefill_mlp_ff1_matmul,
     ace_step_patch_model_args_lm_prefill_qkv_matmul,
     ace_step_patch_model_args_lm_prefill_wo_matmul,
     ace_step_promote_attention_wqkv_to_dram_interleaved,
@@ -252,11 +254,23 @@ class QwenModelTtTransformers:
                 use_hf_rope=bool(use_hf_rope),
             )
 
+        _trace_api = hasattr(ttnn, "begin_trace_capture") and hasattr(ttnn, "execute_trace")
+        if use_prefill_trace is None and use_decode_trace is None:
+            _prefill = bool(use_trace)
+            _decode = bool(use_trace)
+        else:
+            _prefill = bool(use_prefill_trace if use_prefill_trace is not None else use_trace)
+            _decode = bool(use_decode_trace if use_decode_trace is not None else False)
+        self._use_prefill_trace = _prefill and _trace_api
+        self._use_decode_trace = _decode and _trace_api
+        ace_step_set_lm_prefill_trace_active(self._use_prefill_trace)
+
         if ace_step_lm_prefill_l1_enabled():
             ace_step_apply_qwen_prefill_l1(self.tt_model, self.model_args)
         if ace_step_lm_prefill_qkv_sweep_enabled():
             ace_step_patch_model_args_lm_prefill_qkv_matmul(self.model_args, device)
             ace_step_patch_model_args_lm_prefill_wo_matmul(self.model_args, device)
+            ace_step_patch_model_args_lm_prefill_mlp_ff1_matmul(self.model_args, device)
             ace_step_promote_attention_wqkv_to_dram_interleaved(self.tt_model)
         if ace_step_lm_unified_decode_shard_enabled():
             ace_step_patch_model_args_decode_unified_shard(self.model_args)
@@ -284,15 +298,6 @@ class QwenModelTtTransformers:
         # logits row out of the ``[1, 1, 32, padded_vocab]`` tile-aligned LMHead output.
         # ``None`` until at least one prefill has run.
         self._prefill_last_token_offset_in_tile: Optional[int] = None
-        _trace_api = hasattr(ttnn, "begin_trace_capture") and hasattr(ttnn, "execute_trace")
-        if use_prefill_trace is None and use_decode_trace is None:
-            _prefill = bool(use_trace)
-            _decode = bool(use_trace)
-        else:
-            _prefill = bool(use_prefill_trace if use_prefill_trace is not None else use_trace)
-            _decode = bool(use_decode_trace if use_decode_trace is not None else False)
-        self._use_prefill_trace = _prefill and _trace_api
-        self._use_decode_trace = _decode and _trace_api
         self._decode_trace = _DecodeTraceState()
         # Keyed by (padded_prefill_len, real_seq_len): ``get_last_token`` is baked into the
         # captured graph and must match ``seq_len``, not just the padded length bucket.

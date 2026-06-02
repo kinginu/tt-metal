@@ -154,6 +154,7 @@ def test_perf_ace_step_llm_tracy_profile(device):
 def _ace_step_enable_llm_tracy_perf_env() -> None:
     """Opt-in perf knobs for Tracy (PCC-safe defaults elsewhere)."""
     os.environ.setdefault("ACE_STEP_LM_PREFILL_L1", "1")
+    os.environ.setdefault("ACE_STEP_LM_PREFILL_MLP_FF1_L1", "1")
     os.environ.setdefault("ACE_STEP_LM_UNIFIED_DECODE_SHARD", "1")
     os.environ.setdefault("ACE_STEP_LM_DECODE_QK_NORM_SHARDED", "1")
     os.environ.setdefault("ACE_STEP_LM_SDPA_GATHER_UNIFIED", "1")

@@ -1486,11 +1486,11 @@ def ace_step_five_hz_lm_bfloat8_weights_enabled() -> bool:
 
 
 def ace_step_lm_prefill_qkv_sweep_enabled() -> bool:
-    """Pin swept 5 Hz LM prefill attention matmuls (QKV 128×2048×4096, WO 128×2048×2048).
+    """Pin swept 5 Hz LM prefill matmuls (QKV/WO/MLP gate-up at seq_len≤128).
 
-    Default **on** — HiFi4/bf16 1D 8×4 w8 l1/dram/l1 (QKV) and l1/dram/ws (WO).  Keeps
-    ``accuracy_decoder_config`` (BF16 weights + HiFi4).  Disables with
-    ``ACE_STEP_LM_PREFILL_QKV_SWEEP=0``.
+    Default **on** — HiFi4/bf16 1D 8×4: QKV w8 l1/dram/l1, WO w8 l1/dram/ws,
+    MLP gate/up w4 l1/dram/ws.  Keeps ``accuracy_decoder_config`` (BF16 + HiFi4).
+    Disables with ``ACE_STEP_LM_PREFILL_QKV_SWEEP=0``.
     """
     return os.environ.get("ACE_STEP_LM_PREFILL_QKV_SWEEP", "1").lower() not in ("0", "false", "no", "off")
 
@@ -1498,6 +1498,22 @@ def ace_step_lm_prefill_qkv_sweep_enabled() -> bool:
 def ace_step_lm_prefill_wo_sweep_enabled() -> bool:
     """Same gate as :func:`ace_step_lm_prefill_qkv_sweep_enabled` (WO pin ships together)."""
     return ace_step_lm_prefill_qkv_sweep_enabled()
+
+
+_lm_prefill_trace_active: bool = False
+
+
+def ace_step_set_lm_prefill_trace_active(active: bool) -> None:
+    """Record whether the 5 Hz LM uses ``_prefill_traced`` (set at model init)."""
+    global _lm_prefill_trace_active
+    _lm_prefill_trace_active = bool(active)
+
+
+def ace_step_lm_prefill_trace_active() -> bool:
+    """True when TTNN prefill trace capture/replay is enabled for the LM."""
+    if _lm_prefill_trace_active:
+        return True
+    return os.environ.get("ACE_STEP_USE_TRACE", "").lower() in ("1", "true", "yes", "on")
 
 
 def ace_step_lm_prefill_l1_enabled() -> bool:
@@ -1584,14 +1600,18 @@ def ace_step_five_hz_lm_optimizations(model_args: Any):
     return DecodersPrecision(model_args.n_layers, model_args.model_name, decoder_conf=conf)
 
 
-# Swept 5 Hz LM prefill attention matmuls at seq_len=128:
+# Swept 5 Hz LM prefill matmuls at seq_len=128:
 # QKV 128×2048×4096 — HiFi4/bf16, 1D mcast_in0, 8×4, w8, out_subblock 2×2, l1/dram/l1 (~61 us BH).
 # WO  128×2048×2048 — HiFi4/bf16, 1D mcast_in0, 8×4, w8, out_subblock 1×2, l1/dram/ws (~32 us BH).
+# FF1 128×2048×6144 — HiFi4/bf16, 1D mcast_in0, 8×4, w4, out_subblock 1×3, l1/dram/ws (~87 us BH).
 _LM_PREFILL_QKV_SWEEP_KN = (2048, 4096)
 _LM_PREFILL_WO_SWEEP_KN = (2048, 2048)
+_LM_PREFILL_MLP_FF1_SWEEP_KN = (2048, 6144)
 _LM_PREFILL_ATTN_SWEEP_M = 128
 _LM_PREFILL_ATTN_SWEEP_GRID = (8, 4)
 _LM_PREFILL_ATTN_SWEEP_IN0_BLOCK_W = 8
+_LM_PREFILL_MLP_FF1_IN0_BLOCK_W = 4
+_LM_PREFILL_MLP_FF1_WS_SUBBLOCK = (1, 3)
 
 
 def _lm_prefill_1d_mcast_program_config(
@@ -1602,8 +1622,10 @@ def _lm_prefill_1d_mcast_program_config(
     n_dim: int,
     batch_size: int = 1,
     width_sharded_out: bool = False,
+    in0_block_w: int | None = None,
+    ws_subblock: tuple[int, int] | None = None,
 ):
-    """Shared 1D mcast pin builder for swept prefill attention linears."""
+    """Shared 1D mcast pin builder for swept prefill linears."""
     import ttnn
 
     m = max(1, int(batch_size)) * max(1, int(seq_len))
@@ -1624,15 +1646,20 @@ def _lm_prefill_1d_mcast_program_config(
     kt = int(k_dim) // tile
     nt = int(n_dim) // tile
     cores = gx * gy
-    ibw = _LM_PREFILL_ATTN_SWEEP_IN0_BLOCK_W
+    ibw = int(in0_block_w if in0_block_w is not None else _LM_PREFILL_ATTN_SWEEP_IN0_BLOCK_W)
     if kt % ibw or nt % cores:
         return None
 
     per_core_n = nt // cores
     if width_sharded_out:
-        sh, sw = 1, min(2, per_core_n)
-        while per_core_n % sw and sw > 1:
-            sw -= 1
+        if ws_subblock is not None:
+            sh, sw = ws_subblock
+            if per_core_n % sw:
+                return None
+        else:
+            sh, sw = 1, min(2, per_core_n)
+            while per_core_n % sw and sw > 1:
+                sw -= 1
     else:
         sh, sw = 2, 2
         if mt % sh or per_core_n % sw:
@@ -1692,6 +1719,44 @@ def ace_step_lm_prefill_wo_matmul_program_config(
         n_dim=int(n_dim),
         batch_size=batch_size,
         width_sharded_out=True,
+    )
+
+
+def ace_step_lm_prefill_mlp_ff1_sweep_enabled() -> bool:
+    """Same gate as :func:`ace_step_lm_prefill_qkv_sweep_enabled` (MLP gate/up pin ships together)."""
+    return ace_step_lm_prefill_qkv_sweep_enabled()
+
+
+def ace_step_lm_prefill_mlp_ff1_l1_activations_enabled() -> bool:
+    """Opt-in l1/dram/ws activations for swept MLP gate/up (Tracy / isolated LM only).
+
+    Default **off** — ``run_prompt_to_wav`` shares the device with DiT/VAE; L1 gate/up I/O
+    clashes with matmul circular buffers (``L1 buffer … 1201920`` vs CB ``1257984``).
+    Set ``ACE_STEP_LM_PREFILL_MLP_FF1_L1=1`` for Tracy LLM perf harnesses.
+    """
+    return os.environ.get("ACE_STEP_LM_PREFILL_MLP_FF1_L1", "0").lower() in ("1", "true", "yes", "on")
+
+
+def ace_step_lm_prefill_mlp_ff1_matmul_program_config(
+    device: Any,
+    *,
+    seq_len: int,
+    k_dim: int,
+    n_dim: int,
+    batch_size: int = 1,
+):
+    """Pinned 1D program config for swept prefill MLP gate/up (l1/dram/ws), else ``None``."""
+    if (int(k_dim), int(n_dim)) != _LM_PREFILL_MLP_FF1_SWEEP_KN:
+        return None
+    return _lm_prefill_1d_mcast_program_config(
+        device,
+        seq_len=seq_len,
+        k_dim=int(k_dim),
+        n_dim=int(n_dim),
+        batch_size=batch_size,
+        width_sharded_out=True,
+        in0_block_w=_LM_PREFILL_MLP_FF1_IN0_BLOCK_W,
+        ws_subblock=_LM_PREFILL_MLP_FF1_WS_SUBBLOCK,
     )
 
 
