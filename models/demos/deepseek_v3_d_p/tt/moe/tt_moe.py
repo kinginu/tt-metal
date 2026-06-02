@@ -432,6 +432,20 @@ class TtMoe(LightweightModule):
         # ========================================
         # Reshape 3D -> 2D for gate: (batch, seq, emb) -> (batch*seq, emb)
 
+        # Padding awareness is only validated/safe for RIGHT padding. With right padding,
+        # real tokens have the lowest indices, so they are packed first in every expert
+        # region and stay within the shortened FFN/dispatch bound. For left padding the
+        # real tokens land at the tail of each region while padded tokens (in non-sentinel
+        # gate modes) are dispatched first, so a shortened bound could drop real tokens.
+        # Disable padding awareness for left padding and process the full (always-correct)
+        # token range by clearing actual_isl for the rest of this forward.
+        if actual_isl is not None and padding_side != "right":
+            logger.warning(
+                "[TtMoe.forward] padding-aware MoE is only supported for right padding; "
+                f"got padding_side={padding_side!r}. Falling back to the full token range."
+            )
+            actual_isl = None
+
         # Build the per-device [local_real_tokens, pad_side] config once and share the
         # SAME tensor between the gate topk (sentinel-marks padded rows) and the dispatch
         # op (bounds its token loop). This is only valid in DEVICE_FP32, where the gate
@@ -475,9 +489,10 @@ class TtMoe(LightweightModule):
             _offsets_host = ttnn.to_torch(_offsets_4d, mesh_composer=_ep_composer).squeeze(2)
             logger.info(f"[TtMoe.forward] expert_region_offsets: {_offsets_host.flatten().tolist()}")
 
-        # Gate outputs uint16 indices; dispatch requires int32.
-        # this should be aligned in the further PR.
-        # Typecast in TILE_LAYOUT to avoid alignment issues, then convert to ROW_MAJOR.
+        # Gate outputs uint16 indices; dispatch requires int32 in ROW_MAJOR layout.
+        # Convert to ROW_MAJOR first, then typecast in place. The sentinel value
+        # (num_routed_experts) fits in both uint16 and int32, so no clamping occurs.
+        # TODO: align the gate output dtype with dispatch to drop this conversion.
         indices = ttnn.to_layout(indices, ttnn.ROW_MAJOR_LAYOUT)
         if indices.dtype != ttnn.int32:
             indices = ttnn.typecast(indices, ttnn.int32)

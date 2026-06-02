@@ -25,9 +25,17 @@ from models.demos.deepseek_v3_d_p.utils.perf_utils import (
 
 _TEST_PATH = "models/demos/deepseek_v3_d_p/tests/pcc/test_ttnn_moe.py::test_ttnn_moe"
 
-_CMD_8X1 = f"pytest {_TEST_PATH} -k 'perf-host-64 and linear-8 and pad50'"
-_CMD_2X4 = f"pytest {_TEST_PATH} -k 'perf-device-256 and mesh-2x4 and not linear-8 and not mesh-4x2 and not mesh-8x4 and pad50'"
-_CMD_8X4 = f"pytest {_TEST_PATH} -k 'perf-device-256 and mesh-8x4 and not linear-8 and not mesh-4x2 and not mesh-2x4 and pad50'"
+_CMD_8X1 = f"pytest {_TEST_PATH} -k 'perf-host-64 and linear-8 and pad0'"
+_CMD_2X4 = (
+    f"pytest {_TEST_PATH} -k 'perf-device-256 and mesh-2x4 and not linear-8 and not mesh-4x2 and not mesh-8x4 and pad0'"
+)
+_CMD_8X4 = (
+    f"pytest {_TEST_PATH} -k 'perf-device-256 and mesh-8x4 and not linear-8 and not mesh-4x2 and not mesh-2x4 and pad0'"
+)
+
+_CMD_8X1_pad50 = f"pytest {_TEST_PATH} -k 'perf-host-64 and linear-8 and pad50'"
+_CMD_2X4_pad50 = f"pytest {_TEST_PATH} -k 'perf-device-256 and mesh-2x4 and not linear-8 and not mesh-4x2 and not mesh-8x4 and pad50'"
+_CMD_8X4_pad50 = f"pytest {_TEST_PATH} -k 'perf-device-256 and mesh-8x4 and not linear-8 and not mesh-4x2 and not mesh-2x4 and pad50'"
 
 
 @pytest.mark.timeout(0)
@@ -65,4 +73,14 @@ def test_deepseek_v3_moe_perf_galaxy():
         batch_size=1,
         margin=0.03,
         comments="seq3200_glx_8x4_ground_truth",
+    )
+    run_model_device_perf_test_with_merge(
+        command=_CMD_8X4_pad50,
+        expected_device_perf_ns_per_iteration=62_301_298,
+        subdir="deepseek_v3_moe",
+        model_name="deepseek_v3_moe_glx_8x4",
+        num_iterations=1,
+        batch_size=1,
+        margin=0.03,
+        comments="seq3200_glx_8x4_ground_truth_pad50",
     )

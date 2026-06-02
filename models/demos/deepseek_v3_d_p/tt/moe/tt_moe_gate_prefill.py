@@ -558,7 +558,7 @@ class TtMoEGatePrefill(LightweightModule):
         actual_isl: int = None,
         padding_side: str = "right",
         padding_config: ttnn.Tensor = None,
-    ) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
+    ) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
         mode = self.fallback_mode
         logger.debug(f"[MoeGate] fallback_mode={mode.value}")
 
