@@ -282,7 +282,7 @@ extern "C" uint32_t _start1() {
                 // cfg_regs[RISCV_IC_INVALIDATE_InvalidateAll_ADDR32] =
                 //     RISCV_IC_BRISC_MASK | RISCV_IC_TRISC_ALL_MASK | RISCV_IC_NCRISC_MASK;
 
-                for (uint32_t i = 0; i < MaxDMProcessorsPerCoreType; i++) {
+                for (uint32_t i = 0; i < MaxNumKernels; i++) {
                     mailboxes->shared_globals_ready[i] = SHARED_GLOBALS_READY_WAIT;
                     mailboxes->fw_shared_globals_ready[i] = SHARED_GLOBALS_READY_WAIT;
                 }
