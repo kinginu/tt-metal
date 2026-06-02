@@ -23,6 +23,11 @@
 
 namespace tt::tt_fabric::detail {
 
+// Full definition of the opaque session type forward-declared in topology_solver.hpp.
+struct TopologySatSession {
+    TopologySatSolver solver;
+};
+
 // ── Adjacency and Edge Helpers ────────────────────────────────────────────────
 namespace {
 
@@ -266,9 +271,12 @@ void topology_sat_add_shape_clause_or_unsat(
             solver.add(-lit);
             solver.add(0);
         } else {
-            solver.add(1);
+            // No variables were ever declared — declare one now so CaDiCaL's strict variable check
+            // (factor=1, enabled by default in CaDiCaL 3.0.0) accepts the literal.
+            const int v = solver.declare_one_more_variable();
+            solver.add(v);
             solver.add(0);
-            solver.add(-1);
+            solver.add(-v);
             solver.add(0);
         }
         return;
@@ -293,9 +301,10 @@ bool topology_sat_add_blocking_clause_for_mapping_impl(
                 solver.add(-lit);
                 solver.add(0);
             } else {
-                solver.add(1);
+                const int v = solver.declare_one_more_variable();
+                solver.add(v);
                 solver.add(0);
-                solver.add(-1);
+                solver.add(-v);
                 solver.add(0);
             }
         } else {
@@ -1616,6 +1625,40 @@ bool topology_sat_search_n(
     }
 
     return !all_mappings_out.empty();
+}
+
+// ── Session bridge functions (public API — declared in topology_solver.hpp) ────
+
+void topology_sat_session_destroy(TopologySatSession* p) noexcept { delete p; }
+
+std::unique_ptr<TopologySatSession, TopologySatSessionDeleter> topology_sat_session_create_and_encode(
+    const TopologySatGraphView& graph_data,
+    const TopologySatConstraintView& constraint_data,
+    TopologySatHardEncoding& enc,
+    ConnectionValidationMode validation_mode) {
+    auto session = std::unique_ptr<TopologySatSession, TopologySatSessionDeleter>(new TopologySatSession{});
+    session->solver.configure_for_blocking_clause_enumeration();
+    enc = {};
+    if (!topology_sat_encode_hard_constraints(session->solver, graph_data, constraint_data, enc, validation_mode)) {
+        return nullptr;
+    }
+    return session;
+}
+
+bool topology_sat_session_add_blocking_clause(
+    TopologySatSession* session,
+    TopologySatHardEncoding& enc,
+    const std::vector<int>& raw_mapping,
+    bool unique_shapes) {
+    return topology_sat_add_blocking_clause_for_mapping(session->solver, enc, raw_mapping, unique_shapes);
+}
+
+bool topology_sat_session_solve_and_decode(
+    TopologySatSession* session, const TopologySatHardEncoding& enc, std::vector<int>& raw_out) {
+    if (session->solver.solve() != TopologySatSolver::kSat) {
+        return false;
+    }
+    return topology_sat_decode_hard_solution(session->solver, enc, raw_out);
 }
 
 }  // namespace tt::tt_fabric::detail
