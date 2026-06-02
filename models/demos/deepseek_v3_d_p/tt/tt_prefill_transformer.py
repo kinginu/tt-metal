@@ -236,6 +236,8 @@ class TtPrefillTransformer(LightweightModule):
             token_ids: [1, 1, seq_len_per_chip] uint32, SP-sharded
             kvpe_cache: externally created KVPE cache [num_layers, 1, seq_len_local, head_dim];
                         each layer writes to its own slot via cache_layer_idx
+            actual_isl: count of real (unpadded) tokens in the sequence; threaded down to
+                        MLA / MoE gate / LM head for padding awareness.
             return_intermediates: if True, sync + snapshot to host after each stage
             read_profiler: if True, read TTNN profiler after each layer to avoid profiler buffer overflows
             temperature: Temperature for sampling. Can be a single float or list of floats.
@@ -306,9 +308,7 @@ class TtPrefillTransformer(LightweightModule):
                     logger.debug(f"Skipping reordering for intermediate {key} of type {type(tensor)}")
 
         # Sample token(s) from logits
-        first_token_id, first_token_prob, sweep_results = self._sample(
-            first_token_logits, actual_isl, temperature
-        )
+        first_token_id, first_token_prob, sweep_results = self._sample(first_token_logits, actual_isl, temperature)
 
         if return_intermediates:
             intermediates["first_token"] = sweep_results

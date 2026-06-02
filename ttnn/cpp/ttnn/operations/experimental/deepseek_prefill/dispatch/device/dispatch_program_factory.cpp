@@ -83,6 +83,28 @@ void create_tensor_cb(
     });
 }
 
+// Create a single-page scratch CB used to read the per-device padding_config row
+// ([local_real_tokens, pad_side]) into L1 so the dispatch kernels can bound their
+// token loop to the real (unpadded) tokens. ProgramDescriptor-flavored: pushes a
+// CBDescriptor onto the desc instead of calling CreateCircularBuffer.
+void create_padding_config_cb(
+    tt::tt_metal::ProgramDescriptor& desc,
+    const CoreRangeSet& core_range_set,
+    const ttnn::Tensor& padding_config,
+    tt::CBIndex cb_id) {
+    auto aligned_page_size = get_aligned_page_size(padding_config);
+    auto data_format = tt::tt_metal::datatype_to_dataformat_converter(padding_config.dtype());
+    desc.cbs.push_back(tt::tt_metal::CBDescriptor{
+        .total_size = aligned_page_size,
+        .core_ranges = core_range_set,
+        .format_descriptors = {{tt::tt_metal::CBFormatDescriptor{
+            .buffer_index = static_cast<uint8_t>(cb_id),
+            .data_format = data_format,
+            .page_size = aligned_page_size,
+        }}},
+    });
+}
+
 }  // namespace detail
 
 namespace {
@@ -591,10 +613,36 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
         fabric_defines["AXIS"] = std::to_string(operation_attributes.axis.value());
     }
 
+    // ==================== Padding-config scratch CBs ====================
+    // When a padding_config is provided, each dispatch kernel reads its device-local
+    // [local_real_tokens, pad_side] row to bound its token loop. The sender reader and
+    // the two idle RISCs read into distinct CBs (idle reader and writer run on separate
+    // RISCs of the same core, so they must not share a scratch CB).
+    const bool has_padding_config = tensor_args.padding_config.has_value();
+    constexpr auto cb_padding_config_sender = tt::CBIndex::c_14;
+    constexpr auto cb_padding_config_idle_reader = tt::CBIndex::c_14;
+    constexpr auto cb_padding_config_idle_writer = tt::CBIndex::c_15;
+    if (has_padding_config) {
+        detail::create_padding_config_cb(
+            desc, sender_core_grid, tensor_args.padding_config.value(), cb_padding_config_sender);
+        detail::create_padding_config_cb(
+            desc, idle_core_grid, tensor_args.padding_config.value(), cb_padding_config_idle_reader);
+        detail::create_padding_config_cb(
+            desc, idle_core_grid, tensor_args.padding_config.value(), cb_padding_config_idle_writer);
+    }
+
     // ==================== Per-sender reader kernels ====================
     // Each sender gets its own reader kernel with per-sender idle core count baked in.
     auto reader_defines = fabric_defines;
     reader_defines["IS_TILE_LAYOUT"] = "1";
+    if (has_padding_config) {
+        reader_defines["HAS_PADDING_CONFIG"] = "1";
+    }
+    // Idle-core kernels only need the padding-config define (no fabric / tile-layout defines).
+    std::map<std::string, std::string> idle_defines;
+    if (has_padding_config) {
+        idle_defines["HAS_PADDING_CONFIG"] = "1";
+    }
     std::vector<tt::tt_metal::KernelHandle> reader_kernel_ids;
     reader_kernel_ids.reserve(num_cores);
     for (uint32_t s = 0; s < num_cores; s++) {
@@ -608,6 +656,12 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
         per_sender_compile_args.push_back(static_cast<uint32_t>(tt::CBIndex::c_10));  // cb_signal_id
         per_sender_compile_args.push_back(total_workers);                             // total_workers
         per_sender_compile_args.push_back(static_cast<uint32_t>(tt::CBIndex::c_19));  // cb_route_table_scratch_id
+        // padding_config TensorAccessorArgs + scratch CB id appended LAST.
+        if (has_padding_config) {
+            tt::tt_metal::TensorAccessorArgs(tensor_args.padding_config.value().buffer())
+                .append_to(per_sender_compile_args);
+            per_sender_compile_args.push_back(static_cast<uint32_t>(cb_padding_config_sender));
+        }
 
         CoreRangeSet single_sender_core({CoreRange(sender_cores[s])});
         tt::tt_metal::KernelDescriptor reader_kd;
@@ -676,6 +730,11 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
         };
         // Append TensorAccessorArgs for input tensor only
         tt::tt_metal::TensorAccessorArgs(input_tensor.buffer()).append_to(idle_reader_compile_args);
+        if (has_padding_config) {
+            tt::tt_metal::TensorAccessorArgs(tensor_args.padding_config.value().buffer())
+                .append_to(idle_reader_compile_args);
+            idle_reader_compile_args.push_back(static_cast<uint32_t>(cb_padding_config_idle_reader));
+        }
 
         // Writer compile args (NOC-write side)
         std::vector<uint32_t> idle_writer_compile_args = {
@@ -694,6 +753,11 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
         };
         tt::tt_metal::TensorAccessorArgs(output_tensor.buffer()).append_to(idle_writer_compile_args);
         tt::tt_metal::TensorAccessorArgs(metadata_tensor.buffer()).append_to(idle_writer_compile_args);
+        if (has_padding_config) {
+            tt::tt_metal::TensorAccessorArgs(tensor_args.padding_config.value().buffer())
+                .append_to(idle_writer_compile_args);
+            idle_writer_compile_args.push_back(static_cast<uint32_t>(cb_padding_config_idle_writer));
+        }
 
         CoreRangeSet single_idle_core({CoreRange(all_idle_cores[j])});
         tt::tt_metal::KernelDescriptor idle_reader_kd;
@@ -703,6 +767,7 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
         idle_reader_kd.source_type = tt::tt_metal::KernelDescriptor::SourceType::FILE_PATH;
         idle_reader_kd.core_ranges = single_idle_core;
         idle_reader_kd.compile_time_args = std::move(idle_reader_compile_args);
+        idle_reader_kd.defines = {idle_defines.begin(), idle_defines.end()};
         idle_reader_kd.config = tt::tt_metal::DataMovementConfigDescriptor{
             .processor = tt::tt_metal::DataMovementProcessor::RISCV_1,
             .noc = tt::tt_metal::detail::preferred_noc_for_dram_read(mesh_device->arch()),
@@ -717,6 +782,7 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
         idle_writer_kd.source_type = tt::tt_metal::KernelDescriptor::SourceType::FILE_PATH;
         idle_writer_kd.core_ranges = single_idle_core;
         idle_writer_kd.compile_time_args = std::move(idle_writer_compile_args);
+        idle_writer_kd.defines = {idle_defines.begin(), idle_defines.end()};
         idle_writer_kd.config = tt::tt_metal::DataMovementConfigDescriptor{
             .processor = tt::tt_metal::DataMovementProcessor::RISCV_0,
             .noc = tt::tt_metal::detail::preferred_noc_for_dram_write(mesh_device->arch()),
@@ -820,7 +886,12 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
     // Helper: promote a flat uint32_t RT arg vector into an RTArgList with the
     // first 7 positions converted to Buffer* (so BufferBindings are auto-
     // registered for those slots), preserving all other positions verbatim.
-    auto promote_rt_args_with_buffer_bindings = [&](const std::vector<uint32_t>& raw_args) {
+    // When `is_reader` is set and a padding_config is present, the reader-only
+    // padding_config base address at fixed index 13 is promoted to a Buffer* so its
+    // BufferBinding is refreshed on cache hit (the tensor is reallocated each call).
+    // The writer must NOT be promoted at index 13: that slot is its exit_semaphore,
+    // whose GlobalSemaphore address is stable across the cached workload.
+    auto promote_rt_args_with_buffer_bindings = [&](const std::vector<uint32_t>& raw_args, bool is_reader) {
         tt::tt_metal::KernelDescriptor::RTArgList args;
         args.reserve(raw_args.size());
         args.push_back(input_tensor.buffer());
@@ -831,7 +902,11 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
         args.push_back(metadata_tensor.buffer());
         args.push_back(dispatch_table_tensor.buffer());
         for (size_t i = 7; i < raw_args.size(); ++i) {
-            args.push_back(raw_args[i]);
+            if (is_reader && has_padding_config && i == 13) {
+                args.push_back(tensor_args.padding_config.value().buffer());
+            } else {
+                args.push_back(raw_args[i]);
+            }
         }
         return args;
     };
@@ -848,6 +923,13 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
         // init/exit reuse race where a fast peer's exit-inc lands during the post-init
         // set(0) window).
         writer_runtime_args.push_back((uint32_t)exit_semaphore.address());
+
+        // Reader-only: padding_config address at fixed index 13 (right after the 13 base
+        // args, before the variable-length sync args). Stored as a placeholder here; the
+        // promote helper rebinds index 13 to a Buffer* so it refreshes on cache hit.
+        if (has_padding_config) {
+            reader_runtime_args.push_back((uint32_t)tensor_args.padding_config.value().buffer()->address());
+        }
 
         // Inter-core sync args for reader
         reader_runtime_args.push_back(data_ready_semaphore_ids[core_idx]);
@@ -897,9 +979,9 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
         }
 
         desc.kernels[reader_kernel_ids[core_idx]].emplace_runtime_args(
-            sender_core, promote_rt_args_with_buffer_bindings(reader_runtime_args));
+            sender_core, promote_rt_args_with_buffer_bindings(reader_runtime_args, /*is_reader=*/true));
         desc.kernels[writer_kernel_id].emplace_runtime_args(
-            sender_core, promote_rt_args_with_buffer_bindings(writer_runtime_args));
+            sender_core, promote_rt_args_with_buffer_bindings(writer_runtime_args, /*is_reader=*/false));
         core_idx++;
     }
 
@@ -915,6 +997,11 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
         // Buffer* so the framework records a BufferBinding.
         tt::tt_metal::KernelDescriptor::RTArgList idle_reader_rt_args;
         idle_reader_rt_args.push_back(input_tensor.buffer());
+        // padding_config base address at index 1 (idle reader) — pushed as Buffer*
+        // so its BufferBinding is refreshed on cache hit (it is reallocated each call).
+        if (has_padding_config) {
+            idle_reader_rt_args.push_back(tensor_args.padding_config.value().buffer());
+        }
         desc.kernels[reader_untilize_kernel_ids[j]].emplace_runtime_args(all_idle_cores[j], idle_reader_rt_args);
 
         // Idle writer: output_tensor (slot 6) and metadata_tensor (slot 7) are
@@ -930,6 +1017,10 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
         idle_writer_rt_args.push_back(metadata_tensor.buffer());
         idle_writer_rt_args.push_back(mbox_ready_semaphore_ids[s]);
         idle_writer_rt_args.push_back(mbox_scratch_addr_semaphore_id);
+        // padding_config base address at index 10 (idle writer) — pushed as Buffer*.
+        if (has_padding_config) {
+            idle_writer_rt_args.push_back(tensor_args.padding_config.value().buffer());
+        }
         desc.kernels[writer_untilize_kernel_ids[j]].emplace_runtime_args(all_idle_cores[j], idle_writer_rt_args);
     }
 
@@ -1232,6 +1323,21 @@ tt::tt_metal::ProgramDescriptor create_at_row_major(
         fabric_defines["AXIS"] = std::to_string(operation_attributes.axis.value());
     }
 
+    // Padding-config support: only the reader reads the config, so it gets a dedicated
+    // copy of the compile args (config TensorAccessorArgs + scratch CB id appended last)
+    // and the HAS_PADDING_CONFIG define. The writer keeps the shared compile args.
+    const bool has_padding_config = tensor_args.padding_config.has_value();
+    constexpr auto cb_padding_config_sender = tt::CBIndex::c_14;
+    auto reader_compile_args = compile_time_args;
+    auto reader_defines = fabric_defines;
+    if (has_padding_config) {
+        detail::create_padding_config_cb(
+            desc, sender_core_grid, tensor_args.padding_config.value(), cb_padding_config_sender);
+        tt::tt_metal::TensorAccessorArgs(tensor_args.padding_config.value().buffer()).append_to(reader_compile_args);
+        reader_compile_args.push_back(static_cast<uint32_t>(cb_padding_config_sender));
+        reader_defines["HAS_PADDING_CONFIG"] = "1";
+    }
+
     // Single reader kernel shared across all senders.  (Legacy code stored one
     // handle per sender for uniform override_runtime_arguments iteration; the
     // descriptor framework uses BufferBindings on cache hit so the duplication
@@ -1242,8 +1348,8 @@ tt::tt_metal::ProgramDescriptor create_at_row_major(
         "reader_dispatch.cpp";
     reader_kd.source_type = tt::tt_metal::KernelDescriptor::SourceType::FILE_PATH;
     reader_kd.core_ranges = sender_core_grid;
-    reader_kd.compile_time_args = compile_time_args;
-    reader_kd.defines = {fabric_defines.begin(), fabric_defines.end()};
+    reader_kd.compile_time_args = reader_compile_args;
+    reader_kd.defines = {reader_defines.begin(), reader_defines.end()};
     reader_kd.config = tt::tt_metal::DataMovementConfigDescriptor{
         .processor = tt::tt_metal::DataMovementProcessor::RISCV_1,
         .noc = tt::tt_metal::detail::preferred_noc_for_dram_read(mesh_device->arch()),
@@ -1285,7 +1391,10 @@ tt::tt_metal::ProgramDescriptor create_at_row_major(
         num_cores,                    // num_dispatch_cores
     };
 
-    auto promote_rt_args_with_buffer_bindings = [&](const std::vector<uint32_t>& raw_args) {
+    // Reader-only: padding_config base address sits at fixed index 13 and is promoted
+    // to a Buffer* so its BufferBinding refreshes on cache hit. The writer's index 13 is
+    // its exit_semaphore (stable GlobalSemaphore address) and must stay a plain uint32_t.
+    auto promote_rt_args_with_buffer_bindings = [&](const std::vector<uint32_t>& raw_args, bool is_reader) {
         tt::tt_metal::KernelDescriptor::RTArgList args;
         args.reserve(raw_args.size());
         args.push_back(input_tensor.buffer());
@@ -1296,7 +1405,11 @@ tt::tt_metal::ProgramDescriptor create_at_row_major(
         args.push_back(metadata_tensor.buffer());
         args.push_back(dispatch_table_tensor.buffer());
         for (size_t i = 7; i < raw_args.size(); ++i) {
-            args.push_back(raw_args[i]);
+            if (is_reader && has_padding_config && i == 13) {
+                args.push_back(tensor_args.padding_config.value().buffer());
+            } else {
+                args.push_back(raw_args[i]);
+            }
         }
         return args;
     };
@@ -1308,6 +1421,11 @@ tt::tt_metal::ProgramDescriptor create_at_row_major(
 
         reader_runtime_args[11] = core_idx;
         writer_runtime_args[11] = core_idx;
+
+        // Reader-only: padding_config address at index 13 (right after the 13 base args).
+        if (has_padding_config) {
+            reader_runtime_args.push_back((uint32_t)tensor_args.padding_config.value().buffer()->address());
+        }
 
         // Writer-only: exit semaphore address (separate from init_semaphore to avoid
         // init/exit reuse race; mirrors the combine fix).
@@ -1340,9 +1458,9 @@ tt::tt_metal::ProgramDescriptor create_at_row_major(
         }
 
         desc.kernels[reader_kernel_id].emplace_runtime_args(
-            sender_core, promote_rt_args_with_buffer_bindings(reader_runtime_args));
+            sender_core, promote_rt_args_with_buffer_bindings(reader_runtime_args, /*is_reader=*/true));
         desc.kernels[writer_kernel_id].emplace_runtime_args(
-            sender_core, promote_rt_args_with_buffer_bindings(writer_runtime_args));
+            sender_core, promote_rt_args_with_buffer_bindings(writer_runtime_args, /*is_reader=*/false));
         core_idx++;
     }
 
@@ -1388,7 +1506,6 @@ tt::tt_metal::WorkloadDescriptor DispatchProgramFactory::create_workload_descrip
             "Prefill dispatch: FP8 path — output buffer is allocated as UINT8 but content is Fp8_e4m3. "
             "CBs reinterpret UINT8 tensors as Fp8_e4m3 (temporary, until FP8 has a dedicated dtype).");
     }
-
     // Dispatch is mesh-coord-dependent (fabric routing + linearized mesh
     // coordinate are baked into kernel compile-time args), so we cannot
     // replicate one ProgramDescriptor across the whole mesh — every coord

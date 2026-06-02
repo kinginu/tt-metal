@@ -116,6 +116,20 @@ void kernel_main() {
     constexpr uint32_t writer_page_size = aligned_input_page_size;
 #endif
 
+#ifdef HAS_PADDING_CONFIG
+    // padding_config TensorAccessorArgs + scratch CB id are appended LAST in the
+    // compile-time args (after the tile-only reader args, if any) so they never shift
+    // the existing index layout.
+#ifdef IS_TILE_LAYOUT
+    constexpr uint32_t padding_cfg_cta_offset = dispatch_table_args.next_compile_time_args_offset() + 6;
+#else
+    constexpr uint32_t padding_cfg_cta_offset = dispatch_table_args.next_compile_time_args_offset();
+#endif
+    constexpr auto padding_cfg_args = TensorAccessorArgs<padding_cfg_cta_offset>();
+    constexpr uint32_t cb_padding_config_id =
+        get_compile_time_arg_val(padding_cfg_args.next_compile_time_args_offset());
+#endif
+
     // ===== Runtime Args =====
     uint32_t rt_args = 0;
     uint32_t input_tensor_address = get_arg_val<uint32_t>(rt_args++);
@@ -132,6 +146,12 @@ void kernel_main() {
     uint32_t dispatch_core_idx = get_arg_val<uint32_t>(rt_args++);
     uint32_t num_dispatch_cores = get_arg_val<uint32_t>(rt_args++);
     uint32_t core_mask = num_dispatch_cores - 1;
+
+#ifdef HAS_PADDING_CONFIG
+    // Read BEFORE the variable-length tile sync args so the index is fixed (== 13) for
+    // both layouts; the host appends it right after the 13 base runtime args.
+    uint32_t padding_config_address = get_arg_val<uint32_t>(rt_args++);
+#endif
 
 #ifdef IS_TILE_LAYOUT
     // Inter-core sync args
@@ -222,6 +242,31 @@ void kernel_main() {
     }
     noc_async_read_barrier();
     tt_l1_ptr int32_t* expert_dispatch_table = reinterpret_cast<tt_l1_ptr int32_t*>(dispatch_table_base_addr);
+
+#ifdef HAS_PADDING_CONFIG
+    // Bound the token loop to this device's real (unpadded) tokens. The per-device
+    // padding_config row is [local_real_tokens, pad_side]; for right padding we shrink
+    // token_end_idx to the next TILE_HEIGHT(32)-aligned multiple of the real count.
+    // Left padding (pad_side != 0) keeps the full range (unsupported fast path).
+    // The unified batch loop below derives total_batches from token_end_idx, so this
+    // single override shrinks the loop for both the tile and row-major paths.
+    {
+        const auto padding_cfg_gen = TensorAccessor(padding_cfg_args, padding_config_address);
+        cb_reserve_back(cb_padding_config_id, 1);
+        uint32_t pc_l1 = get_write_ptr(cb_padding_config_id);
+        noc_async_read_page(0, padding_cfg_gen, pc_l1);
+        noc_async_read_barrier();
+        tt_l1_ptr uint32_t* pc = reinterpret_cast<tt_l1_ptr uint32_t*>(pc_l1);
+        uint32_t real_count = pc[0];
+        uint32_t pad_side = pc[1];
+        if (pad_side == 0) {
+            uint32_t rounded = ((real_count + 31u) / 32u) * 32u;
+            if (rounded < token_end_idx) {
+                token_end_idx = rounded;
+            }
+        }
+    }
+#endif
 
     // Reserve scratch space once — these CBs are not used as FIFOs. Each batch
     // overwrites the same region at offsets [0, batch_count) without push/pop.

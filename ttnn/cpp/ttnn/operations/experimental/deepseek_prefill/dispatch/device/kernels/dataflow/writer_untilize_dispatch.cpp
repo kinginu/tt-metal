@@ -41,7 +41,9 @@ void kernel_main() {
     constexpr uint32_t cb_untilize_id = get_compile_time_arg_val(0);
     constexpr uint32_t read_batch_size = get_compile_time_arg_val(1);
     constexpr uint32_t aligned_output_page_size = get_compile_time_arg_val(2);
-    constexpr uint32_t total_batches = get_compile_time_arg_val(3);
+    // total_batches is the full (unpadded) batch count; reduced at runtime below when
+    // padding-aware so this idle core waits for exactly the batches its reader produces.
+    uint32_t total_batches = get_compile_time_arg_val(3);
     constexpr uint32_t core_id = get_compile_time_arg_val(4);
     constexpr uint32_t total_workers = get_compile_time_arg_val(5);
     // New: direct-DRAM-write support
@@ -52,6 +54,11 @@ void kernel_main() {
     constexpr uint32_t linearized_mesh_coord = get_compile_time_arg_val(10);
     constexpr auto output_args = TensorAccessorArgs<11>();
     constexpr auto metadata_args = TensorAccessorArgs<output_args.next_compile_time_args_offset()>();
+#ifdef HAS_PADDING_CONFIG
+    constexpr auto padding_cfg_args = TensorAccessorArgs<metadata_args.next_compile_time_args_offset()>();
+    constexpr uint32_t cb_padding_config_id =
+        get_compile_time_arg_val(padding_cfg_args.next_compile_time_args_offset());
+#endif
 
     constexpr uint32_t total_transfer_size = read_batch_size * aligned_output_page_size;
 
@@ -68,6 +75,28 @@ void kernel_main() {
     uint32_t metadata_tensor_address = get_arg_val<uint32_t>(rt_idx++);
     uint32_t mbox_ready_semaphore_id = get_arg_val<uint32_t>(rt_idx++);
     uint32_t mbox_scratch_addr_semaphore_id = get_arg_val<uint32_t>(rt_idx++);
+
+#ifdef HAS_PADDING_CONFIG
+    // Reduce total_batches to ceil(local_real_tokens / 32) — same formula the paired
+    // idle reader uses — so this writer waits for exactly the batches that get produced.
+    {
+        uint32_t padding_config_address = get_arg_val<uint32_t>(rt_idx++);
+        const auto padding_cfg_gen = TensorAccessor(padding_cfg_args, padding_config_address);
+        cb_reserve_back(cb_padding_config_id, 1);
+        uint32_t pc_l1 = get_write_ptr(cb_padding_config_id);
+        noc_async_read_page(0, padding_cfg_gen, pc_l1);
+        noc_async_read_barrier();
+        tt_l1_ptr uint32_t* pc = reinterpret_cast<tt_l1_ptr uint32_t*>(pc_l1);
+        uint32_t real_count = pc[0];
+        uint32_t pad_side = pc[1];
+        if (pad_side == 0) {
+            uint32_t effective_batches = (real_count + 31u) / 32u;
+            if (effective_batches < total_batches) {
+                total_batches = effective_batches;
+            }
+        }
+    }
+#endif
 
     uint64_t sender_data_ready_noc_addr =
         get_noc_addr(sender_noc_x, sender_noc_y, get_semaphore(data_ready_semaphore_id));

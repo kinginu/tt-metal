@@ -147,7 +147,7 @@ class TtDeepSeekPrefillPipeline:
         self.model.forward(
             tt_token_ids,
             self.kvpe_cache,
-            number_of_non_padded_tokens=max_seq_len,
+            actual_isl=max_seq_len,
             temperature=0.0,
         )
         warmup_ms = (time.perf_counter() - t0) * 1000.0
@@ -173,7 +173,7 @@ class TtDeepSeekPrefillPipeline:
         first_token_id, _first_token_prob, _ = self.model.forward(
             tt_token_ids,
             self.kvpe_cache,
-            number_of_non_padded_tokens=actual_isl,
+            actual_isl=actual_isl,
             on_layer_complete=on_layer_complete,
             temperature=0.0,
         )

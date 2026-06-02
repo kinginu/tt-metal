@@ -511,7 +511,7 @@ def test_prefill_transformer(
         first_token_id, first_token_prob, tt_intermediates = transformer(
             tt_tokens,
             tt_kvpe_cache,
-            number_of_non_padded_tokens=number_of_non_padded_tokens,
+            actual_isl=number_of_non_padded_tokens,
             return_intermediates=pcc_validation,
             read_profiler=True,
             temperature=temperature,

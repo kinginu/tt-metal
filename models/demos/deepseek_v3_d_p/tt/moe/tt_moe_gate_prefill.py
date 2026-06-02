@@ -485,11 +485,18 @@ class TtMoEGatePrefill(LightweightModule):
             ),
         )
 
+    def build_padding_config(self, actual_isl: int, padding_side: str = "right") -> ttnn.Tensor:
+        """Public wrapper around _make_padding_config_tensor so callers (TtMoe) can
+        build the per-device [local_real_tokens, pad_side] config once and share the
+        same tensor between the gate topk and the dispatch op."""
+        return self._make_padding_config_tensor(actual_isl, padding_side)
+
     def _device_grouped_gate_fp32(
         self,
         logits: ttnn.Tensor,
         actual_isl: int = None,
         padding_side: str = "right",
+        padding_config: ttnn.Tensor = None,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor]:
         """Run moe_grouped_topk on device with fp32 typecast.
 
@@ -497,10 +504,16 @@ class TtMoEGatePrefill(LightweightModule):
         indices (= n_routed_experts) so downstream masked_bincount/dispatch/
         combine skip them.  For SP > 1, the padding config tensor carries
         per-device local real-token counts.
+
+        If a caller-owned ``padding_config`` is provided it is used as-is (and the
+        caller is responsible for deallocating it, since it may be shared with the
+        dispatch op). Otherwise one is built locally and freed here.
         """
-        padding_config = (
-            self._make_padding_config_tensor(actual_isl, padding_side) if actual_isl is not None else None
-        )
+        owns_padding_config = padding_config is None
+        if owns_padding_config:
+            padding_config = (
+                self._make_padding_config_tensor(actual_isl, padding_side) if actual_isl is not None else None
+            )
 
         logits_f32 = ttnn.typecast(logits, ttnn.float32)
         bias_f32 = ttnn.typecast(self.bias, ttnn.float32)
@@ -518,7 +531,7 @@ class TtMoEGatePrefill(LightweightModule):
         )
         ttnn.deallocate(logits_f32)
         ttnn.deallocate(bias_f32)
-        if padding_config is not None:
+        if owns_padding_config and padding_config is not None:
             ttnn.deallocate(padding_config)
         return ttnn_scores, ttnn_top_k_experts_indices
 
@@ -544,6 +557,7 @@ class TtMoEGatePrefill(LightweightModule):
         x: ttnn.Tensor,
         actual_isl: int = None,
         padding_side: str = "right",
+        padding_config: ttnn.Tensor = None,
     ) -> tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
         mode = self.fallback_mode
         logger.debug(f"[MoeGate] fallback_mode={mode.value}")
@@ -566,6 +580,7 @@ class TtMoEGatePrefill(LightweightModule):
                 logits,
                 actual_isl=actual_isl,
                 padding_side=padding_side,
+                padding_config=padding_config,
             )
 
         elif mode == GateComputeMode.HOST_GROUPED_GATE:

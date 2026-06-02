@@ -432,10 +432,21 @@ class TtMoe(LightweightModule):
         # ========================================
         # Reshape 3D -> 2D for gate: (batch, seq, emb) -> (batch*seq, emb)
 
+        # Build the per-device [local_real_tokens, pad_side] config once and share the
+        # SAME tensor between the gate topk (sentinel-marks padded rows) and the dispatch
+        # op (bounds its token loop). This is only valid in DEVICE_FP32, where the gate
+        # actually sentinel-marks padded tokens so routing_setup/combine stay consistent
+        # with a shortened dispatch loop. In other gate modes padded tokens keep real
+        # expert indices, so dispatch must process the full range -> padding_config=None.
+        padding_config = None
+        if actual_isl is not None and self.gate.fallback_mode == GateComputeMode.DEVICE_FP32:
+            padding_config = self.gate.build_padding_config(actual_isl, padding_side)
+
         scores, indices, gate_logits = self.gate(
             ttnn.view(x, (x.shape[0] * x.shape[1], x.shape[2])),
             actual_isl=actual_isl,
             padding_side=padding_side,
+            padding_config=padding_config,
         )
         signpost(header="moe_gate_calculate_dispatch_offsets")
         tt_expert_offsets, tt_expert_token_counts, tt_expert_region_offsets, _ = self.routing_setup(
@@ -467,12 +478,9 @@ class TtMoe(LightweightModule):
         # Gate outputs uint16 indices; dispatch requires int32.
         # this should be aligned in the further PR.
         # Typecast in TILE_LAYOUT to avoid alignment issues, then convert to ROW_MAJOR.
+        indices = ttnn.to_layout(indices, ttnn.ROW_MAJOR_LAYOUT)
         if indices.dtype != ttnn.int32:
-            indices = ttnn.to_layout(indices, ttnn.TILE_LAYOUT)
             indices = ttnn.typecast(indices, ttnn.int32)
-            indices = ttnn.to_layout(indices, ttnn.ROW_MAJOR_LAYOUT)
-        else:
-            indices = ttnn.to_layout(indices, ttnn.ROW_MAJOR_LAYOUT)
         #
         # Ensure ROW_MAJOR layout for dispatch compatibility
         scores = ttnn.to_layout(scores, ttnn.ROW_MAJOR_LAYOUT)
@@ -527,9 +535,14 @@ class TtMoe(LightweightModule):
             indices,
             tt_expert_offsets,
             self.tt_expert_dispatch_table,
+            padding_config=padding_config,
         )
         if self.overlap_shared_expert_with_dispatch:
             self.mesh_device.clear_loaded_sub_device_manager()
+        # padding_config was shared with both the gate and dispatch; free it now that
+        # dispatch (its last consumer) has been issued.
+        if padding_config is not None:
+            ttnn.deallocate(padding_config)
         x = ttnn.deallocate(x)
         scores = ttnn.to_memory_config(scores, ttnn.DRAM_MEMORY_CONFIG)
         indices = ttnn.to_memory_config(indices, ttnn.DRAM_MEMORY_CONFIG)

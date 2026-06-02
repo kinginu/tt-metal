@@ -35,10 +35,17 @@ void kernel_main() {
     constexpr uint32_t cb_signal_id = get_compile_time_arg_val(1);
     constexpr uint32_t hidden_size = get_compile_time_arg_val(2);
     constexpr uint32_t aligned_input_page_size = get_compile_time_arg_val(3);
-    constexpr uint32_t total_batches = get_compile_time_arg_val(4);
+    // total_batches is the full (unpadded) batch count; when padding-aware it is reduced
+    // at runtime below to match the sender reader's shortened token loop.
+    uint32_t total_batches = get_compile_time_arg_val(4);
     constexpr uint32_t core_id = get_compile_time_arg_val(5);
     constexpr uint32_t total_workers = get_compile_time_arg_val(6);
     constexpr auto input_args = TensorAccessorArgs<7>();
+#ifdef HAS_PADDING_CONFIG
+    constexpr auto padding_cfg_args = TensorAccessorArgs<input_args.next_compile_time_args_offset()>();
+    constexpr uint32_t cb_padding_config_id =
+        get_compile_time_arg_val(padding_cfg_args.next_compile_time_args_offset());
+#endif
 
     constexpr uint32_t tiles_per_row = hidden_size / 32;
     constexpr uint32_t block_ct_dim = 8;
@@ -48,6 +55,29 @@ void kernel_main() {
     uint32_t input_tensor_address = get_arg_val<uint32_t>(0);
 
     const auto input_addr_gen = TensorAccessor(input_args, input_tensor_address, aligned_input_page_size);
+
+#ifdef HAS_PADDING_CONFIG
+    // Reduce total_batches to ceil(local_real_tokens / 32) so this idle core processes the
+    // same batches the owning sender delegates. read_batch_size for the tile path is 32
+    // (one tile-row per batch), matching the sender's ceil(token_end_idx / 32).
+    {
+        uint32_t padding_config_address = get_arg_val<uint32_t>(1);
+        const auto padding_cfg_gen = TensorAccessor(padding_cfg_args, padding_config_address);
+        cb_reserve_back(cb_padding_config_id, 1);
+        uint32_t pc_l1 = get_write_ptr(cb_padding_config_id);
+        noc_async_read_page(0, padding_cfg_gen, pc_l1);
+        noc_async_read_barrier();
+        tt_l1_ptr uint32_t* pc = reinterpret_cast<tt_l1_ptr uint32_t*>(pc_l1);
+        uint32_t real_count = pc[0];
+        uint32_t pad_side = pc[1];
+        if (pad_side == 0) {
+            uint32_t effective_batches = (real_count + 31u) / 32u;
+            if (effective_batches < total_batches) {
+                total_batches = effective_batches;
+            }
+        }
+    }
+#endif
 
     for (uint32_t batch_idx = core_id; batch_idx < total_batches; batch_idx += total_workers) {
         uint32_t tile_base_page = batch_idx * tiles_per_row;

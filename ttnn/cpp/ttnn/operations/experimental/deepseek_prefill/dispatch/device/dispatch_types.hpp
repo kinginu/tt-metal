@@ -29,6 +29,10 @@ struct DispatchParams {
     CoreRangeSet worker_core_range_set;
     bool use_l1_small_for_semaphores = false;
     bool use_fp8_dispatch = false;
+    // Whether an optional padding_config input is present. Kept as an explicit attribute
+    // so the padding-aware (HAS_PADDING_CONFIG) and full-range programs are guaranteed to
+    // hash to distinct program-cache entries.
+    bool has_padding_config = false;
 
     static constexpr auto attribute_names = std::forward_as_tuple(
         "dispatch_group_size",
@@ -43,7 +47,8 @@ struct DispatchParams {
         "output_mem_config",
         "worker_core_range_set",
         "use_l1_small_for_semaphores",
-        "use_fp8_dispatch");
+        "use_fp8_dispatch",
+        "has_padding_config");
 
     auto attribute_values() const {
         return std::forward_as_tuple(
@@ -59,7 +64,8 @@ struct DispatchParams {
             output_mem_config,
             worker_core_range_set,
             use_l1_small_for_semaphores,
-            use_fp8_dispatch);
+            use_fp8_dispatch,
+            has_padding_config);
     };
 };
 
@@ -69,6 +75,12 @@ struct DispatchInputs {
     Tensor indices_tensor;
     Tensor expert_offsets_tensor;
     Tensor expert_dispatch_table_tensor;
+    // Optional per-device [local_real_tokens, pad_side] config (uint32, ROW_MAJOR,
+    // shape (1, 2) per device). When present, the dispatch kernels read it on device
+    // and bound their token loop to the real (unpadded) tokens. Its presence/absence
+    // participates in the program cache hash (tensor_args reflection), so the
+    // padding-aware and full-range programs are cached separately.
+    std::optional<Tensor> padding_config = std::nullopt;
 };
 
 }  // namespace ttnn::operations::experimental::deepseek_prefill::dispatch
