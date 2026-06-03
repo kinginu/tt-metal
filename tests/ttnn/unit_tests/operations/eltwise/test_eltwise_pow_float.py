@@ -14,15 +14,23 @@ from tests.ttnn.python_api_testing.sweep_tests import ttnn_ops
 
 def run_pow_tests(input_shape, dtype, dlayout, in_mem_config, output_mem_config, data_seed, device):
     torch.manual_seed(data_seed)
+    random.seed(data_seed)
 
-    x = torch.Tensor(size=input_shape[0]).uniform_(-100, 100)
+    # bfloat8_b input with negative base + fractional exponent yields NaN in torch.pow
+    # but inf/zero on device; restrict to non-negative inputs for that path.
+    in_low, in_high = (-100, 100)
+    if dtype[0] == ttnn.bfloat8_b:
+        in_low, in_high = (0, 100)
+
+    x = torch.Tensor(size=input_shape[0]).uniform_(in_low, in_high)
     y = random.uniform(0, 10)
 
     try:
-        # get ref result
-        ref_value = torch.pow(x, y)
-
         x = ttnn_ops.setup_ttnn_tensor(x, device, dlayout[0], in_mem_config, dtype[0])
+
+        # Golden must use the dtype-quantized values the kernel actually sees.
+        x_quantized = ttnn_ops.ttnn_tensor_to_torch(x, in_mem_config).to(torch.float32)
+        ref_value = torch.pow(x_quantized, y)
 
         tt_result = ttnn.pow(x, y)
         tt_result = ttnn_ops.ttnn_tensor_to_torch(tt_result, output_mem_config)

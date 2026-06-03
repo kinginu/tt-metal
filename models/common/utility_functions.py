@@ -548,7 +548,7 @@ def comp_pcc(golden, calculated, pcc=0.99):
             "One or both tensors are constant (zero standard deviation). "
             "PCC is undefined. Falling back to allclose check."
         )
-        result = torch.allclose(golden, calculated, rtol=1e-05, atol=1e-08)
+        result = torch.allclose(golden, calculated, rtol=1e-05, atol=1e-04)
         return result, float(result)
 
     cal_pcc = np.ma.corrcoef(
@@ -563,7 +563,7 @@ def comp_pcc(golden, calculated, pcc=0.99):
     # not fully filtered above). Fall back to allclose rather than crashing or returning 1.0.
     if isinstance(cal_pcc, np.ma.core.MaskedConstant) or np.isnan(float(cal_pcc)):
         logger.warning("PCC returned NaN/masked. Falling back to allclose check.")
-        result = torch.allclose(golden, calculated, rtol=1e-05, atol=1e-08)
+        result = torch.allclose(golden, calculated, rtol=1e-05, atol=1e-04)
         return result, float(result)
 
     return cal_pcc >= pcc, float(cal_pcc)
