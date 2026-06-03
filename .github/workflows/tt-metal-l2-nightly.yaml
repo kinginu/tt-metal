@@ -110,6 +110,11 @@ on:
         type: boolean
         default: false
 
+      use-artifacts-from-run:
+        description: 'Reuse build artifacts from this run ID to skip the build step'
+        required: false
+        type: string
+        default: ''
 jobs:
   build-artifact:
     uses: ./.github/workflows/build-artifact.yaml
@@ -123,6 +128,7 @@ jobs:
       skip-tt-train: false
       platform: ${{ inputs.platform || 'Ubuntu 22.04' }}
       enable-lto: ${{ inputs.enable-lto || false }}
+      use-artifacts-from-run: ${{ inputs.use-artifacts-from-run || '' }}
   generate-arch-matrix:
     runs-on: ubuntu-latest
     outputs:
