@@ -60,27 +60,29 @@ def test_deepseek_v3_moe_perf_loudbox():
 
 
 @pytest.mark.timeout(0)
-def test_deepseek_v3_moe_perf_galaxy():
-    """8x4 galaxy ground truth — the reference the loudbox approximation targets."""
+@pytest.mark.parametrize(
+    "command, expected_device_perf_ns_per_iteration, comments",
+    [
+        (_CMD_8X4, 105_670_132, "seq3200_glx_8x4_ground_truth"),
+        (_CMD_8X4_pad50, 62_301_298, "seq3200_glx_8x4_ground_truth_pad50"),
+    ],
+    ids=["pad0", "pad50"],
+)
+def test_deepseek_v3_moe_perf_galaxy(command, expected_device_perf_ns_per_iteration, comments):
+    """8x4 galaxy ground truth — the reference the loudbox approximation targets.
+
+    Each padding variant (pad0, pad50) is an independent parametrized case so they are
+    invoked/passed/failed independently.
+    """
     if not _is_galaxy_env():
         pytest.skip("This test requires 8x4 mesh - galaxy. (set MESH_DEVICE=TG)")
     run_model_device_perf_test_with_merge(
-        command=_CMD_8X4,
-        expected_device_perf_ns_per_iteration=105_670_132,
+        command=command,
+        expected_device_perf_ns_per_iteration=expected_device_perf_ns_per_iteration,
         subdir="deepseek_v3_moe",
         model_name="deepseek_v3_moe_glx_8x4",
         num_iterations=1,
         batch_size=1,
         margin=0.03,
-        comments="seq3200_glx_8x4_ground_truth",
-    )
-    run_model_device_perf_test_with_merge(
-        command=_CMD_8X4_pad50,
-        expected_device_perf_ns_per_iteration=62_301_298,
-        subdir="deepseek_v3_moe",
-        model_name="deepseek_v3_moe_glx_8x4",
-        num_iterations=1,
-        batch_size=1,
-        margin=0.03,
-        comments="seq3200_glx_8x4_ground_truth_pad50",
+        comments=comments,
     )

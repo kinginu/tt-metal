@@ -326,7 +326,7 @@ def test_prep_dispatch_combine(
     ],
     indirect=["mesh_device", "device_params"],
 )
-@pytest.mark.parametrize("num_padded_rows", [100, 1600, 3199], ids=["few_padded", "half_padded", "nearly_all_padded"])
+@pytest.mark.parametrize("padded_percent", [0, 50, 99], ids=lambda p: f"pad{p}")
 def test_routing_setup_w_padding_awareness(
     mesh_device,
     seq_len_per_chip,
@@ -336,17 +336,18 @@ def test_routing_setup_w_padding_awareness(
     dispatch_buffer_capacity_factor,
     num_links,
     topology,
-    num_padded_rows,
+    padded_percent,
 ):
     """
     Verify that sentinel-indexed token rows are excluded from routing counts.
 
-    Constructs indices where the last `num_padded_rows` are set to SENTINEL
+    Constructs indices where the last `padded_percent`% of rows are set to SENTINEL
     (= num_routed_experts). After running TtMoERoutingSetup, asserts that
     total token counts equal only the real (non-padded) tokens.
     """
     torch.manual_seed(42)
     sentinel = num_routed_experts
+    num_padded_rows = int(seq_len_per_chip * padded_percent / 100)
 
     mesh_config = extract_mesh_config(mesh_device)
     sp_axis = mesh_config.sp_axis
@@ -378,7 +379,8 @@ def test_routing_setup_w_padding_awareness(
     )
 
     # Overwrite the last `num_padded_rows` with SENTINEL on every device shard
-    indices[:, -num_padded_rows:, :] = sentinel
+    if num_padded_rows > 0:
+        indices[:, -num_padded_rows:, :] = sentinel
 
     expert_dispatch_table = ExpertMapping.create_dispatch_table(
         num_routed_experts=num_routed_experts,
