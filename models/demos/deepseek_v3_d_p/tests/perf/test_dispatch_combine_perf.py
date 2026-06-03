@@ -241,7 +241,7 @@ _DISPATCH_PERF_PARAMS = [
         dtype_filter="bf16_out",
     ),
     _perf_param(
-        "dispatch", "test_prefill_dispatch.py", "test_ttnn_dispatch", "ring", 2, 3_683_084, "", dtype_filter="bf16_out"
+        "dispatch", "test_prefill_dispatch.py", "test_ttnn_dispatch", "ring", 2, 2_649_453, "", dtype_filter="bf16_out"
     ),
 ]
 _COMBINE_PERF_PARAMS = [
