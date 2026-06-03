@@ -358,10 +358,6 @@ tt::tt_metal::ProgramDescriptor ReduceDeviceOperation::ReduceMultiCoreHProgramFa
         reduce_defines["REDUCE_POST_MUL"] = "1";
     }
 
-    if (use_sfpu_reduce_path) {
-        reduce_defines["REDUCE_SFPU_PATH"] = "1";
-    }
-
     // Float32 SFPU reduce must unpack source tiles straight into the fp32 DST register.
     // Without this, the unpacker rounds Float32 -> Tf32/bf16 before SFPU sees the data,
     // silently destroying mantissa precision.

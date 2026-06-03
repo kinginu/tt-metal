@@ -68,24 +68,6 @@ ALWI bool sfpu_is_first_tile(uint32_t axis_index, const AccumulateT& accumulate)
     return axis_index == 0;
 }
 
-// Int32/Float32 MAX on REDUCE_ROW/COL uses SFPU. Float32 MAX REDUCE_SCALAR uses FPU. Int32 MAX REDUCE_SCALAR is unsupported.
-template <PoolType reduce_type, ReduceDim reduce_dim, DataFormat reduce_format>
-constexpr bool is_sfpu_reduce_path() {
-    if constexpr (reduce_type != PoolType::MAX) {
-        return false;
-    }
-    if constexpr (reduce_format != DataFormat::Int32 && reduce_format != DataFormat::Float32) {
-        return false;
-    }
-    if constexpr (reduce_dim == ReduceDim::REDUCE_SCALAR) {
-        static_assert(
-            reduce_format != DataFormat::Int32,
-            "Int32 MAX REDUCE_SCALAR is not supported");
-        return false;
-    }
-    return reduce_dim == ReduceDim::REDUCE_ROW || reduce_dim == ReduceDim::REDUCE_COL;
-}
-
 // Post-reduce scalar multiply. mul_unary_tile is fp32-only, so Int32 is bracketed with typecasts
 // (truncates toward zero on the way back); all other formats use plain mul_unary_tile.
 template <DataFormat reduce_format>
@@ -264,6 +246,9 @@ ALWI void reduce(
     // Static Assertions (compile-time validation)
     // =============================================================================
     static_assert(
+        reduce_type != PoolType::MAX || reduce_dim != ReduceDim::REDUCE_SCALAR || reduce_format != DataFormat::Int32,
+        "Int32 MAX REDUCE_SCALAR is not supported");
+    static_assert(
         is_accumulation_type_v<AccumulateT>,
         "AccumulateT must be a valid accumulation type (NoAccumulation or Accumulate)");
     static_assert(
@@ -299,7 +284,7 @@ ALWI void reduce(
     const uint32_t num_batches = input_block_shape.batches;
 
     constexpr bool use_matmul = reduce_uses_matmul<reduce_type, reduce_dim>();
-    constexpr bool is_sfpu = detail::is_sfpu_reduce_path<reduce_type, reduce_dim, reduce_format>();
+    constexpr bool is_sfpu = is_sfpu_reduce_path<reduce_type, reduce_dim, reduce_format>();
 
     DataflowBuffer input_dfb(input_dfb_id);
     DataflowBuffer scaler_dfb(scaler_dfb_id);
