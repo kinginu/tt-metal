@@ -842,6 +842,40 @@ def tracy_profile():
     profiler.disable()
 
 
+@pytest.fixture
+def expect_tt_error():
+    """Assert a block raises ``error`` (default RuntimeError) whose message matches
+    ``match``, and bracket it with sentinels so CI log analysis ignores that message.
+    An error outside such a bracket — or a different one inside it — is still treated
+    as a real crash.
+
+    Args:
+        match: regex searched in the exception message; also the message CI log
+            analysis strips from the block.
+        error: expected exception type, or a tuple of types (default RuntimeError).
+        reason: optional human note, appended to the BEGIN log line.
+
+    Usage:
+        with expect_tt_error("Out of Memory"):                       # RuntimeError
+            <op that should fail>
+        with expect_tt_error("bad config", ValueError, reason="..."):
+            <op that should fail>
+    """
+
+    @contextlib.contextmanager
+    def _expect(match, error=RuntimeError, reason=""):
+        names = ", ".join(e.__name__ for e in (error if isinstance(error, tuple) else (error,)))
+        suffix = f" — {reason}" if reason else ""
+        logger.warning(f"[EXPECTED_TT_ERROR BEGIN] match={match!r} error={names}{suffix}")
+        try:
+            with pytest.raises(error, match=match):
+                yield
+        finally:
+            logger.warning(f"[EXPECTED_TT_ERROR END] match={match!r}")
+
+    return _expect
+
+
 ###############################
 # Modifying pytest hooks
 ###############################
