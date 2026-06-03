@@ -258,9 +258,7 @@ ALWI void reduce(
     ReduceInputMemoryLayout input_memory_layout,
     AccumulateT accumulate,
     PostReduceOp post_reduce_op) {
-    // Input data format is deduced from the input CB id (now a compile-time template parameter).
-    // Int32/Float32 MAX is routed to the SFPU path via is_sfpu_reduce_path<>(); all other formats
-    // use the FPU/GMPOOL path. This replaces the former explicit reduce_format template parameter.
+    // Int32/Float32 MAX is routed to the SFPU path via is_sfpu_reduce_path<>(); all other formats use FPU/GMPOOL.
     constexpr DataFormat reduce_format = static_cast<DataFormat>(unpack_src_format[input_dfb_id]);
     // =============================================================================
     // Static Assertions (compile-time validation)

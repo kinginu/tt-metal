@@ -359,7 +359,6 @@ tt::tt_metal::ProgramDescriptor ReduceDeviceOperation::ReduceMultiCoreHProgramFa
     }
 
     if (use_sfpu_reduce_path) {
-        reduce_defines["REDUCE_FORMAT"] = a.dtype() == DataType::INT32 ? "DataFormat::Int32" : "DataFormat::Float32";
         reduce_defines["REDUCE_SFPU_PATH"] = "1";
     }
 
@@ -462,7 +461,7 @@ tt::tt_metal::ProgramDescriptor ReduceDeviceOperation::ReduceMultiCoreHProgramFa
         };
     }
 
-    // reduce.cpp is REDUCE_FORMAT-aware; MIN uses -MAX(-x) in reduce_h_neg.
+    // MIN on Int32/Float32 uses -MAX(-x) in reduce_h_neg.
     const std::string compute_kernel =
         rm_path ? std::string("ttnn/cpp/ttnn/operations/reduction/generic/device/kernels/compute/reduce_rm.cpp")
                 : std::string("ttnn/cpp/ttnn/operations/reduction/generic/device/kernels/compute/reduce") +
