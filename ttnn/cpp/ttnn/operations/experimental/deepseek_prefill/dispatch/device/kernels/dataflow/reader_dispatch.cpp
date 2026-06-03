@@ -218,7 +218,6 @@ void kernel_main() {
         for (uint32_t t = 0; t < batch_count; t++) {
             uint32_t token_idx = batch_start + t;
             uint32_t token_input_addr = input_base + t * aligned_input_page_size;
-#endif
             tt_l1_ptr uint16_t* indices =
                 reinterpret_cast<tt_l1_ptr uint16_t*>(indices_base + t * aligned_indices_page_size);
             tt_l1_ptr uint16_t* weights =
