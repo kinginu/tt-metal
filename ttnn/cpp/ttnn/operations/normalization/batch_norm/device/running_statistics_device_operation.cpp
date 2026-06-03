@@ -100,6 +100,39 @@ RunningStatistics::tensor_return_value_t RunningStatistics::create_output_tensor
         compute_output_specs(operation_attributes, tensor_args), tensor_args.batch_mean.device());
 }
 
+ttsl::hash::hash_t RunningStatistics::compute_program_hash(
+    const operation_attributes_t& attributes, const tensor_args_t& tensor_args) {
+    const auto& [batch_mean, batch_var, running_mean, running_var] = tensor_args;
+
+    TT_FATAL(is_device_tensor(batch_mean), "Unexpected type {}", batch_mean.storage_type());
+
+    auto get_tensor_hash = [](const Tensor& tensor) {
+        const auto& tile = tensor.tensor_spec().tile();
+        return ttsl::hash::hash_objects_with_default_seed(
+            tensor.logical_shape(),
+            tensor.padded_shape(),
+            tensor.physical_volume(),
+            tensor.dtype(),
+            tensor.layout(),
+            tensor.memory_config(),
+            tile.get_height(),
+            tile.get_width());
+    };
+    auto get_optional_tensor_hash = [&](const std::optional<Tensor>& tensor_opt) {
+        if (!tensor_opt.has_value()) {
+            return ttsl::hash::hash_objects_with_default_seed(false);
+        }
+        return ttsl::hash::hash_objects_with_default_seed(true, get_tensor_hash(tensor_opt.value()));
+    };
+
+    return operation::hash_operation<RunningStatistics>(
+        attributes,
+        get_tensor_hash(batch_mean),
+        get_tensor_hash(batch_var),
+        get_optional_tensor_hash(running_mean),
+        get_optional_tensor_hash(running_var));
+}
+
 }  // namespace ttnn::operations::normalization
 
 namespace ttnn::prim {
