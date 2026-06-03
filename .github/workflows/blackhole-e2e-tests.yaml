@@ -199,7 +199,7 @@ jobs:
           echo "run-result=$RESULT" >> "$GITHUB_OUTPUT"
       - id: ai-run-summary
         continue-on-error: true
-        uses: tenstorrent/tt-github-actions/.github/actions/ai_summary/run@main
+        uses: tenstorrent/tt-github-actions/.github/actions/ai_summary/run@ppetrovic/ai-summary-negative-test
         with:
           config: |
             {
