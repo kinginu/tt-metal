@@ -83,28 +83,6 @@ void create_tensor_cb(
     });
 }
 
-// Create a single-page scratch CB used to read the per-device padding_config row
-// ([local_real_tokens, pad_side]) into L1 so the dispatch kernels can bound their
-// token loop to the real (unpadded) tokens. ProgramDescriptor-flavored: pushes a
-// CBDescriptor onto the desc instead of calling CreateCircularBuffer.
-void create_padding_config_cb(
-    tt::tt_metal::ProgramDescriptor& desc,
-    const CoreRangeSet& core_range_set,
-    const ttnn::Tensor& padding_config,
-    tt::CBIndex cb_id) {
-    auto aligned_page_size = get_aligned_page_size(padding_config);
-    auto data_format = tt::tt_metal::datatype_to_dataformat_converter(padding_config.dtype());
-    desc.cbs.push_back(tt::tt_metal::CBDescriptor{
-        .total_size = aligned_page_size,
-        .core_ranges = core_range_set,
-        .format_descriptors = {{tt::tt_metal::CBFormatDescriptor{
-            .buffer_index = static_cast<uint8_t>(cb_id),
-            .data_format = data_format,
-            .page_size = aligned_page_size,
-        }}},
-    });
-}
-
 }  // namespace detail
 
 namespace {
@@ -623,12 +601,27 @@ tt::tt_metal::ProgramDescriptor create_at_tile_layout(
     constexpr auto cb_padding_config_idle_reader = tt::CBIndex::c_14;
     constexpr auto cb_padding_config_idle_writer = tt::CBIndex::c_15;
     if (has_padding_config) {
-        detail::create_padding_config_cb(
-            desc, sender_core_grid, tensor_args.padding_config.value(), cb_padding_config_sender);
-        detail::create_padding_config_cb(
-            desc, idle_core_grid, tensor_args.padding_config.value(), cb_padding_config_idle_reader);
-        detail::create_padding_config_cb(
-            desc, idle_core_grid, tensor_args.padding_config.value(), cb_padding_config_idle_writer);
+        detail::create_tensor_cb(
+            desc,
+            sender_core_grid,
+            tensor_args.padding_config.value(),
+            /*buffering_factor=*/1,
+            cb_padding_config_sender,
+            "padding_config");
+        detail::create_tensor_cb(
+            desc,
+            idle_core_grid,
+            tensor_args.padding_config.value(),
+            /*buffering_factor=*/1,
+            cb_padding_config_idle_reader,
+            "padding_config");
+        detail::create_tensor_cb(
+            desc,
+            idle_core_grid,
+            tensor_args.padding_config.value(),
+            /*buffering_factor=*/1,
+            cb_padding_config_idle_writer,
+            "padding_config");
     }
 
     // ==================== Per-sender reader kernels ====================
@@ -1331,8 +1324,13 @@ tt::tt_metal::ProgramDescriptor create_at_row_major(
     auto reader_compile_args = compile_time_args;
     auto reader_defines = fabric_defines;
     if (has_padding_config) {
-        detail::create_padding_config_cb(
-            desc, sender_core_grid, tensor_args.padding_config.value(), cb_padding_config_sender);
+        detail::create_tensor_cb(
+            desc,
+            sender_core_grid,
+            tensor_args.padding_config.value(),
+            /*buffering_factor=*/1,
+            cb_padding_config_sender,
+            "padding_config");
         tt::tt_metal::TensorAccessorArgs(tensor_args.padding_config.value().buffer()).append_to(reader_compile_args);
         reader_compile_args.push_back(static_cast<uint32_t>(cb_padding_config_sender));
         reader_defines["HAS_PADDING_CONFIG"] = "1";

@@ -33,8 +33,6 @@ _CMD_8X4 = (
     f"pytest {_TEST_PATH} -k 'perf-device-256 and mesh-8x4 and not linear-8 and not mesh-4x2 and not mesh-2x4 and pad0'"
 )
 
-_CMD_8X1_pad50 = f"pytest {_TEST_PATH} -k 'perf-host-64 and linear-8 and pad50'"
-_CMD_2X4_pad50 = f"pytest {_TEST_PATH} -k 'perf-device-256 and mesh-2x4 and not linear-8 and not mesh-4x2 and not mesh-8x4 and pad50'"
 _CMD_8X4_pad50 = f"pytest {_TEST_PATH} -k 'perf-device-256 and mesh-8x4 and not linear-8 and not mesh-4x2 and not mesh-2x4 and pad50'"
 
 

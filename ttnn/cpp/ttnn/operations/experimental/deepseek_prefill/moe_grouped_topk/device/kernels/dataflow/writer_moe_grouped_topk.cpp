@@ -443,6 +443,7 @@ void kernel_main() {
     uint32_t num_real_tokens = 0xFFFFFFFF;  // default: no padding
     uint32_t pad_side = 0;
     if (padding_config_addr != 0) {
+        cb_reserve_back(cb_padding_config, 1);
         const uint32_t padding_config_l1_addr = get_write_ptr(cb_padding_config);
         noc_async_read_page(0, padding_config_accessor, padding_config_l1_addr);
         noc_async_read_barrier();
