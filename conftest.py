@@ -842,6 +842,35 @@ def tracy_profile():
     profiler.disable()
 
 
+@pytest.fixture
+def expect_error():
+    """Assert a block raises ``error`` whose message matches the ``message`` regex, and
+    bracket it in the log so CI log analysis ignores that message. An error outside the
+    bracket — or a different one inside it — is still treated as a real crash.
+
+    Args:
+        error: expected exception type, or a tuple of types.
+        message: regex searched in the exception message; also the string CI log
+            analysis strips from the block.
+
+    Usage:
+        with expect_error(RuntimeError, "Out of Memory"):
+            <op that should fail>
+    """
+
+    @contextlib.contextmanager
+    def expect_error_(error, message):
+        names = ", ".join(e.__name__ for e in (error if isinstance(error, tuple) else (error,)))
+        logger.info(f'[EXPECTED_ERROR BEGIN] {names} message="{message}"')
+        try:
+            with pytest.raises(error, match=message):
+                yield
+        finally:
+            logger.info(f'[EXPECTED_ERROR END] {names} message="{message}"')
+
+    return expect_error_
+
+
 ###############################
 # Modifying pytest hooks
 ###############################
