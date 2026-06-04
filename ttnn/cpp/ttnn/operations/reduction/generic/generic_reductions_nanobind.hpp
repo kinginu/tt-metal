@@ -19,7 +19,9 @@ namespace ttnn::operations::reduction::detail {
 
 namespace nb = nanobind;
 
-inline std::string get_generic_reduction_doc(const char* op_name, const char* qualified_name) {
+inline std::string get_generic_reduction_doc(
+    const char* op_name, const char* qualified_name, bool include_int32_min_max = false) {
+    const char* int32_dtype_row = include_int32_min_max ? "                * - INT32\n                  - TILE\n" : "";
     return fmt::format(
         R"doc(
         Computes the {0} of the input tensor :attr:`input_tensor` along the specified dimension(s) :attr:`dim`.
@@ -50,7 +52,7 @@ inline std::string get_generic_reduction_doc(const char* op_name, const char* qu
                   - layout
                 * - FLOAT32
                   - ROW_MAJOR, TILE
-                * - BFLOAT16
+{2}                * - BFLOAT16
                   - ROW_MAJOR, TILE
                 * - BFLOAT8_B
                   - TILE
@@ -65,7 +67,8 @@ inline std::string get_generic_reduction_doc(const char* op_name, const char* qu
             - Output sharding will mirror the input
         )doc",
         op_name,
-        qualified_name);
+        qualified_name,
+        int32_dtype_row);
 }
 
 // Wrapper that detects explicit use of the deprecated 'correction' parameter and
@@ -136,7 +139,7 @@ inline void bind_generic_reductions(nb::module_& mod) {
         nb::arg("correction") = nb::none(),
         nb::arg("sub_core_grids") = nb::none());
 
-    const auto max_doc = get_generic_reduction_doc("max", "ttnn.max");
+    const auto max_doc = get_generic_reduction_doc("max", "ttnn.max", /*include_int32_min_max=*/true);
     ttnn::bind_function<"max">(
         mod,
         max_doc.c_str(),
@@ -151,7 +154,7 @@ inline void bind_generic_reductions(nb::module_& mod) {
         nb::arg("correction") = nb::none(),
         nb::arg("sub_core_grids") = nb::none());
 
-    const auto min_doc = get_generic_reduction_doc("min", "ttnn.min");
+    const auto min_doc = get_generic_reduction_doc("min", "ttnn.min", /*include_int32_min_max=*/true);
     ttnn::bind_function<"min">(
         mod,
         min_doc.c_str(),
