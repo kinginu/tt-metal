@@ -5,11 +5,13 @@
 Shared test helpers for the DeepSeek-V3 MoE / grouped-topk ops.
 
 Covers input generation, padding-config builders, real/pad masking, balanced
-(zigzag) placement math, and the sentinel-padding assertion used by the
-moe_grouped_topk / dispatch padding-awareness tests. These build real ttnn
-device tensors and are intended for tests only (not production model code).
+(zigzag) placement math, the sentinel-padding assertion, and the parametrize
+scenario list used by the moe_grouped_topk / dispatch padding-awareness tests.
+These build real ttnn device tensors and are intended for tests only (not
+production model code).
 """
 
+import pytest
 import torch
 from loguru import logger
 
@@ -77,10 +79,12 @@ def create_sharded_padding_config(mesh_device, local_real_tokens, pad_side):
 
 
 def make_gate_inputs(device, seq_len, *, num_experts=TOTAL_EXPERTS, mesh_mapper=None, transform=None, seed=42):
-    """Generate (1, 1, seq_len, num_experts) score/bias inputs as TILE-layout ttnn tensors.
+    """Generate (1, 1, seq_len, num_experts) score/bias inputs.
 
-    ``transform`` (if given) is applied to the torch tensors before device upload — used by
-    the balanced-placement test to zigzag-reorder the sequence the same way the transformer does.
+    Returns ``(scores, bias, scores_in, bias_in)``: the (possibly transformed) torch tensors —
+    needed for the golden reference — and their TILE-layout ttnn uploads. ``transform`` (if
+    given) is applied to the torch tensors before device upload — used by the balanced-placement
+    scenarios to zigzag-reorder the sequence the same way the transformer does.
     """
     torch.manual_seed(seed)
     scores = generate_distinct_sigmoid_inputs((1, 1, seq_len, num_experts), dtype=torch.float32)
@@ -91,7 +95,7 @@ def make_gate_inputs(device, seq_len, *, num_experts=TOTAL_EXPERTS, mesh_mapper=
     def to_device(t):
         return ttnn.from_torch(t, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=device, mesh_mapper=mesh_mapper)
 
-    return to_device(scores), to_device(bias)
+    return scores, bias, to_device(scores), to_device(bias)
 
 
 def real_token_mask(real_counts, shard_len, pad_side):
@@ -146,3 +150,67 @@ def assert_sentinel_padding(padded_indices, baseline_indices, real_mask, sentine
             pad_rows, expected
         ), f"Padded-row indices are not all sentinel ({sentinel})!\n  Got: {pad_rows}\n  Expected: all {sentinel}"
         logger.info(f"Padded-row indices: all sentinel ({(~real_mask).sum().item()} rows)")
+
+
+_SP_MARK = pytest.mark.requires_mesh_topology(mesh_shape=(4, 1), topology="linear")
+
+
+def grouped_topk_scenarios():
+    """Parametrize scenarios for the unified moe_grouped_topk test.
+
+    Each entry binds its own ``mesh_device`` (indirect), so a single test body covers single-chip,
+    SP-sharded, and balanced placements. Columns are:
+        (mesh_device, seq_len_per_shard, local_real_tokens, pad_side, balanced)
+    where ``seq_len = seq_len_per_shard * len(local_real_tokens)``.
+
+    Single-chip entries use a (1, 1) mesh and omit the ``requires_mesh_topology`` mark so they run
+    on any machine; SP/balanced entries use a marked (4, 1) linear mesh. Full-real entries (all
+    tokens real) exercise the no-padding correctness path against the torch golden; the others
+    additionally exercise sentinel masking.
+    """
+    scenarios = []
+
+    # Correctness / no-padding single-chip cases (full real -> exercises the golden recall+PCC path).
+    # (seq_len, id)
+    for seq_len, sid in [(1, "minimal"), (33, "just_over_one_tile"), (128, "four_tiles"), (3200, "realistic")]:
+        scenarios.append(pytest.param((1, 1), seq_len, [seq_len], 0, False, id=sid))
+
+    # Single-chip padding cases (1x1 mesh): the whole sequence lives on one device.
+    # (seq_len, num_real_tokens, pad_side, id)
+    for seq_len, num_real_tokens, pad_side, sid in [
+        (128, 100, 0, "single_right_pad_boundary"),
+        (128, 100, 1, "single_left_pad_boundary"),
+        (128, 64, 0, "single_right_pad_half"),
+        (128, 1, 0, "single_right_pad_almost_all"),
+        (33, 17, 0, "single_right_pad_non_tile_aligned"),
+        (33, 17, 1, "single_left_pad_non_tile_aligned"),
+    ]:
+        scenarios.append(pytest.param((1, 1), seq_len, [num_real_tokens], pad_side, False, id=sid))
+
+    # SP explicit per-shard counts (4x1 mesh): full, partial, and empty real-token shards.
+    # (local_real_tokens, pad_side, id)
+    for local_real_tokens, pad_side, sid in [
+        ([32, 32, 17, 0], 0, "sp_right_pad_full_partial_empty"),
+        ([32, 32, 0, 0], 0, "sp_right_pad_full_empty"),
+        ([0, 17, 32, 32], 1, "sp_left_pad_empty_partial_full"),
+        ([0, 0, 32, 32], 1, "sp_left_pad_empty_full"),
+    ]:
+        scenarios.append(pytest.param((4, 1), 32, local_real_tokens, pad_side, False, marks=_SP_MARK, id=sid))
+
+    # SP with zigzag/balanced placement (4x1 mesh). Per-shard counts are precomputed (pure-python)
+    # to match the transformer's balanced chunk order; the ``balanced`` flag triggers the same
+    # input reorder inside the test body.
+    # (num_real_tokens, padding_side, id)
+    for num_real_tokens, padding_side, sid in [
+        (100, "right", "balanced_right_pad_partial"),
+        (64, "right", "balanced_right_pad_half"),
+        (128, "right", "balanced_right_pad_none"),
+        (1, "right", "balanced_right_pad_almost_all"),
+        (100, "left", "balanced_left_pad_partial"),
+        (64, "left", "balanced_left_pad_half"),
+    ]:
+        local_real_tokens = balanced_local_real_tokens(4, 128, num_real_tokens, padding_side)
+        pad_side = 0 if padding_side == "right" else 1
+        scenarios.append(pytest.param((4, 1), 32, local_real_tokens, pad_side, True, marks=_SP_MARK, id=sid))
+
+    return scenarios
