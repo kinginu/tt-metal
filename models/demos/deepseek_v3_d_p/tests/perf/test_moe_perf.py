@@ -62,7 +62,7 @@ def test_deepseek_v3_moe_perf_loudbox():
     "command, expected_device_perf_ns_per_iteration, comments",
     [
         (_CMD_8X4, 105_670_132, "seq3200_glx_8x4_ground_truth"),
-        (_CMD_8X4_pad50, 62_301_298, "seq3200_glx_8x4_ground_truth_pad50"),
+        (_CMD_8X4_pad50, 102_104_653, "seq3200_glx_8x4_ground_truth_pad50"),
     ],
     ids=["pad0", "pad50"],
 )

@@ -593,9 +593,7 @@ class TtMoe(LightweightModule):
         # Therefore we must NOT call ttnn.deallocate(dispatched_buffer_tiled) here; doing so
         # would free the storage that expert_outputs still depends on, and the subsequent
         # ttnn.unsqueeze / combine_module calls would raise "Tensor is not allocated".
-        expert_outputs = self.routed_expert(
-            dispatched_buffer_tiled, tt_expert_token_counts, tt_expert_region_offsets, actual_isl=actual_isl
-        )
+        expert_outputs = self.routed_expert(dispatched_buffer_tiled, tt_expert_token_counts, tt_expert_region_offsets)
         logger.debug(f"[TtMoe.forward] expert_outputs shape: {expert_outputs.shape}")
 
         # Add back the batch dimensions for combine
