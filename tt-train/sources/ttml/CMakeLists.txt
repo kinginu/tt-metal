@@ -76,6 +76,7 @@ set(SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/ops/rand_op.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ops/randn_op.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ops/sampling_op.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/ops/q_rope_op.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/optimizers/adamw_composite.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/ops/sampling_op.hpp
     ${CMAKE_CURRENT_SOURCE_DIR}/optimizers/adamw.cpp
@@ -210,6 +211,10 @@ set(METAL_OPS_FILES
     ${CMAKE_CURRENT_SOURCE_DIR}/metal/ops/frobenius_normalize/frobenius_normalize.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/metal/ops/frobenius_normalize/device/frobenius_normalize_device_operation.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/metal/ops/frobenius_normalize/device/frobenius_normalize_program_factory.cpp
+    # MLA Q RoPE forward
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal/ops/q_rope_fw/q_rope_fw.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal/ops/q_rope_fw/device/q_rope_fw_device_operation.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/metal/ops/q_rope_fw/device/q_rope_fw_program_factory.cpp
 )
 
 list(APPEND SOURCES ${METAL_OPS_FILES})
