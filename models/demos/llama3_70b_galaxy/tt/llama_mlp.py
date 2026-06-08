@@ -123,6 +123,18 @@ class TtLlamaMLP(LightweightModule):
         pc_2 = self.model_config["FF2_TG_RING_PROGCFG"]
 
         if self.args.is_blackhole and not self.model_config.get("USE_PREFETCHER", False):
+            # The MLP input arrives width-sharded on the prefetcher ring cores (core column x=6).
+            # The auto-selected 1D matmul compute grid does not span that column, so current main
+            # rejects the sharded input ("Tensor shard spec grid ... must lie within compute grid").
+            # Move the input to DRAM interleaved first (mirrors the FF2 no-prefetch path below).
+            x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
+            # BH Qwen no-prefetch: emit FF1/FF3 to DRAM interleaved (program_config=None) instead of
+            # the prefetcher L1 ring memcfg. The ring memcfg's shard grid uses core column x=6, which
+            # is outside the auto-selected 1D-matmul compute grid; current main validates this
+            # (matmul_device_operation.cpp: "output shard grid ... must lie within extent") and fails.
+            # Going through DRAM also matches the attention QKV / FF2 no-prefetch paths and avoids the
+            # padded-L1 bf8 readback garbage that capped MLP PCC. The following device reduce_scatter
+            # consumes DRAM interleaved cleanly.
             w1_out = ttnn.linear(
                 x,
                 self.w1_interleaved,
@@ -131,7 +143,7 @@ class TtLlamaMLP(LightweightModule):
                 else self.args.compute_kernel_config_hifi2,
                 dtype=ttnn.bfloat8_b,
                 program_config=None,
-                memory_config=self.model_config["SHARDED_FF12_OUT_RING_MEMCFG"],
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 global_cb=None,
                 sub_device_id=None,
             )
@@ -143,7 +155,7 @@ class TtLlamaMLP(LightweightModule):
                 else self.args.compute_kernel_config_hifi2,
                 dtype=ttnn.bfloat8_b,
                 program_config=None,
-                memory_config=self.model_config["SHARDED_FF12_OUT_RING_MEMCFG"],
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 global_cb=None,
                 sub_device_id=None,
             )
@@ -279,6 +291,15 @@ class TtLlamaMLP(LightweightModule):
                     else None
                 ),
             )
+        if (
+            use_bh_qwen_decode_no_pf
+            and not self.model_config.get("USE_PREFETCHER", False)
+            and w2_out.memory_config().buffer_type == ttnn.BufferType.DRAM
+        ):
+            # The FF2 no-prefetch matmul emits to DRAM, but the device all_reduce
+            # (ttnn.experimental.all_reduce_async) rejects DRAM input on Blackhole. Bring it into the
+            # all_reduce's own L1 layout (same per-device shape as the all_reduce output).
+            w2_out = ttnn.to_memory_config(w2_out, self.model_config["DECODE_RESIDUAL_MEMCFG"])
         w2_out_reduced = self.tt_ccl.line_all_reduce(
             w2_out,
             cluster_axis=0,

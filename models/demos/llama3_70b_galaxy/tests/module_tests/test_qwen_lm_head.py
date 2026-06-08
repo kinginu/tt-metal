@@ -37,7 +37,7 @@ from models.demos.llama3_70b_galaxy.tt.llama_ccl import TT_CCL
     [
         {
             "dispatch_core_axis": ttnn.DispatchCoreAxis.COL,
-            "fabric_config": True,
+            "fabric_config": ttnn.FabricConfig.FABRIC_2D_TORUS_XY,
         }
     ],
     indirect=True,

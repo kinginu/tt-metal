@@ -203,9 +203,12 @@ class TtQwenModelArgs(TtModelArgs):
 
         self.qk_norm = True
         self.is_qwen = True
-        # On Blackhole (no prefetcher), unfused decode residual add can hit mixed-layout add
-        # constraints. Prefer fused residual path through distributed RMSNorm there.
-        self.unfuse_res_add = not self.is_blackhole
+        # The BH no-prefetch decode norm is the distributed (non-fused) RMSNorm, which does NOT
+        # write the residual sum back in place. Relying on the fused residual path there silently
+        # drops each layer's ff_out from the residual stream (only visible across >1 layer). Add
+        # the residual explicitly instead; the decoder's BH branch already handles the mixed-layout
+        # add with a DRAM fallback.
+        self.unfuse_res_add = True
         self.pad_logits_to_power_of_2 = True
 
         if self.num_devices == 32:
@@ -312,18 +315,10 @@ class TtQwenModelArgs(TtModelArgs):
             )
         default_links = 2 if self.is_blackhole else 4
         self.model_config["GALAXY_NUM_LINKS"] = int(os.getenv("GALAXY_NUM_LINKS", str(default_links)))
-        # When a ring/torus fabric is selected (QWEN_USE_RING_FABRIC=1 or QWEN_FABRIC=*ring*/*torus*),
-        # each cluster axis forms a ring, so the on-device collectives must use Ring topology to match
-        # the fabric routing. Using Linear topology on a ring/torus fabric leaves the cross-axis route
-        # unmapped (IndexError: map::at).
-        _qwen_fabric = os.getenv("QWEN_FABRIC", "").strip().lower()
-        _qwen_ring_like = (
-            os.getenv("QWEN_USE_RING_FABRIC", "0") == "1" or "ring" in _qwen_fabric or "torus" in _qwen_fabric
-        )
-        if _qwen_ring_like:
-            self.model_config["CCL_TOPOLOGY"] = ttnn.Topology.Ring
-        else:
-            self.model_config["CCL_TOPOLOGY"] = ttnn.Topology.Linear if self.is_blackhole else ttnn.Topology.Ring
+        # Each cluster axis forms a ring on the 2D-torus fabric, so the on-device collectives use Ring
+        # topology to match the fabric routing. (Using Linear on a ring/torus fabric leaves the
+        # cross-axis route unmapped -> IndexError: map::at.)
+        self.model_config["CCL_TOPOLOGY"] = ttnn.Topology.Ring
         if device is not None:
             self.n_local_heads = self.n_heads // self.cluster_shape[1]
 

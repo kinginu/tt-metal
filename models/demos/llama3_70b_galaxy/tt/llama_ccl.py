@@ -24,52 +24,6 @@ USE_LINE_AG = {
 
 class TT_CCL:
     @staticmethod
-    def _shard_shape_str(memory_config):
-        if memory_config is None or not memory_config.is_sharded() or memory_config.shard_spec is None:
-            return "unsharded"
-        shard_shape = memory_config.shard_spec.shape
-        return f"{shard_shape[0]}x{shard_shape[1]}"
-
-    @staticmethod
-    def _memory_config_str(memory_config):
-        if memory_config is None:
-            return "None"
-        try:
-            shard_spec = memory_config.shard_spec
-            if shard_spec is None:
-                return f"{memory_config.memory_layout}, buffer={memory_config.buffer_type}, shard=unsharded"
-            return (
-                f"{memory_config.memory_layout}, buffer={memory_config.buffer_type}, "
-                f"shard={shard_spec.shape}, cores={shard_spec.num_cores()}, orientation={shard_spec.orientation}"
-            )
-        except Exception as e:
-            return f"{memory_config} (failed to inspect: {e})"
-
-    @classmethod
-    def _tensor_config_str(cls, tensor):
-        try:
-            memory_config = tensor.memory_config()
-        except Exception as e:
-            memory_config = f"failed to inspect: {e}"
-        try:
-            memory_config = cls._memory_config_str(memory_config)
-        except Exception:
-            pass
-        try:
-            dtype = tensor.get_dtype()
-        except Exception:
-            dtype = "unknown"
-        try:
-            layout = tensor.get_layout()
-        except Exception:
-            layout = "unknown"
-        try:
-            shape = tuple(tensor.shape)
-        except Exception:
-            shape = "unknown"
-        return f"shape={shape}, dtype={dtype}, layout={layout}, mem={memory_config}"
-
-    @staticmethod
     def _ensure_min_interim_shard_width(memory_config, min_width):
         if memory_config is None or not memory_config.is_sharded() or memory_config.shard_spec is None:
             return memory_config
@@ -108,7 +62,6 @@ class TT_CCL:
         # When prefetcher is disabled, use the default full-device subdevice id.
         self.worker_sub_device_id = worker_sub_device_id if worker_sub_device_id is not None else ttnn.SubDeviceId(0)
         self.model_config = model_args.model_config
-        self.use_old_all_gather_concat = os.getenv("QWEN_USE_OLD_ALL_GATHER_CONCAT", "0") == "1"
         if mode == "decode" and is_qwen:
             # Runtime guard: keep Qwen decode interim shards well above kernel minimum.
             self.model_config["REDUCE_SCATTER_INTERIM_MEMCFG"] = self._ensure_min_interim_shard_width(
@@ -127,12 +80,6 @@ class TT_CCL:
         self.from_remote_semaphore_handles = []
         self.to_remote_semaphore_handles = []
         self.cluster_shape = model_args.cluster_shape
-        # BH Qwen decode no-prefetch: cluster_axis=1 (column) reduce_scatter/all_gather hit
-        # IndexError(map::at) because this Blackhole fabric has no registered column-axis
-        # connection (same wall as the attention user-gather). Route those collectives to the
-        # host helpers until we run on a machine with working (ring) column-axis fabric.
-        # Set QWEN_MLP_HOST_CCL=0 on such a machine to use the on-device CCL path again.
-        self.use_host_col_ccl = os.getenv("QWEN_MLP_HOST_CCL", "1") == "1"
         self.all_gather_concat_inter_tensor = self.get_all_gather_concat_inter_buffer()
 
         self.ring_topology = self.model_config["CCL_TOPOLOGY"] == ttnn.Topology.Ring
@@ -185,9 +132,6 @@ class TT_CCL:
         self.gather_idx = [0, 0]
         self.reduce_scatter_buffer_idx = [0, 0]
         self.barrier_semaphore_idx = [0, 0]
-        self._logged_decode_all_reduce = False
-        self._logged_decode_rs_create_heads = False
-        self._logged_decode_all_reduce_create_heads = False
         self.persistent_buffers = {}
         self.all_gather_buffers = {}
         if mode == "decode":
@@ -823,53 +767,28 @@ class TT_CCL:
         batch_size=1,
     ):
         if self.mode == "decode":
-            # BH Qwen decode without prefetcher: ttnn.all_reduce hits IndexError (map::at) on 8x4
-            # Linear fabric. Route to host unless QWEN_MLP_HOST_CCL=0 (e.g. on a ring-fabric machine
-            # where device column-axis CCL works), which flips all MLP collectives back to device.
-            if (
-                self.is_qwen
-                and not self.model_config.get("USE_PREFETCHER", False)
-                and not lm_head
-                and self.use_host_col_ccl
-            ):
-                output_tensor_mesh = self.line_all_reduce_host(
-                    input_tensor_mesh,
-                    cluster_axis=cluster_axis,
-                    num_links=num_links,
-                    memory_config=memory_config,
-                )
-                self.gather_idx[cluster_axis] = (self.gather_idx[cluster_axis] + 1) % self.num_cbs
-                return output_tensor_mesh
+            if lm_head:
+                persistent_buffer = self.tt_lm_head_buffer_l1
             else:
-                if lm_head:
-                    persistent_buffer = self.tt_lm_head_buffer_l1
-                else:
-                    persistent_buffer = self.persistent_buffers[cluster_axis]
-                if self.is_qwen and not self._logged_decode_all_reduce:
-                    logger.info(
-                        f"[decode all_reduce debug] num_links={num_links}, cluster_axis={cluster_axis}, "
-                        f"output_memcfg_shard={self._shard_shape_str(memory_config)}, "
-                        f"buffer_memcfg_shard={self._shard_shape_str(persistent_buffer.memory_config())}"
-                    )
-                    self._logged_decode_all_reduce = True
-                output_tensor_mesh = ttnn.experimental.all_reduce_async(
-                    input_tensor_mesh,
-                    persistent_buffer,
-                    cluster_axis=cluster_axis,
-                    mesh_device=self.mesh_device,
-                    multi_device_global_semaphore=self.gather_semaphore_handles[cluster_axis][
-                        self.gather_idx[cluster_axis]
-                    ],
-                    num_links=num_links,
-                    memory_config=memory_config,
-                    dtype=dtype,
-                    topology=self.model_config["CCL_TOPOLOGY"],
-                    subdevice_id=self.worker_sub_device_id,
-                    use_noc1_only=use_noc1_only,
-                    use_optimal_ccl_for_llama=use_optimal_ccl_for_llama,
-                )
-                if lm_head:
-                    persistent_buffer.deallocate(True)
+                persistent_buffer = self.persistent_buffers[cluster_axis]
+            output_tensor_mesh = ttnn.experimental.all_reduce_async(
+                input_tensor_mesh,
+                persistent_buffer,
+                cluster_axis=cluster_axis,
+                mesh_device=self.mesh_device,
+                multi_device_global_semaphore=self.gather_semaphore_handles[cluster_axis][
+                    self.gather_idx[cluster_axis]
+                ],
+                num_links=num_links,
+                memory_config=memory_config,
+                dtype=dtype,
+                topology=self.model_config["CCL_TOPOLOGY"],
+                subdevice_id=self.worker_sub_device_id,
+                use_noc1_only=use_noc1_only,
+                use_optimal_ccl_for_llama=use_optimal_ccl_for_llama,
+            )
+            if lm_head:
+                persistent_buffer.deallocate(True)
 
         else:
             if buffer_key == "WO_AG" or lm_head:
@@ -929,14 +848,6 @@ class TT_CCL:
         dtype=None,
         use_noc1_only=False,
     ):
-        if self.is_qwen and not self._logged_decode_all_reduce_create_heads:
-            logger.info(
-                f"[decode all_reduce_create_qkv_heads debug] num_links={num_links}, cluster_axis={cluster_axis}, "
-                f"output_memcfg_shard={self._shard_shape_str(memory_config)}, "
-                f"final_memcfg_shard={self._shard_shape_str(qkv_memory_config)}, "
-                f"buffer_memcfg_shard={self._shard_shape_str(self.persistent_buffers[cluster_axis].memory_config())}"
-            )
-            self._logged_decode_all_reduce_create_heads = True
         (
             xqkv_reduced,
             q_heads_pre_rot_1BQD,
@@ -1077,13 +988,6 @@ class TT_CCL:
         use_optimal_ccl_for_llama=False,
     ):
         persistent_interim_buffer = self.rs_create_heads_buffers[cluster_axis]
-        if self.is_qwen and not self._logged_decode_rs_create_heads:
-            logger.info(
-                f"[decode llama_rs_create_heads debug] num_links={num_links}, cluster_axis={cluster_axis}, "
-                f"qkv_memcfg_shard={self._shard_shape_str(qkv_memory_config)}, "
-                f"buffer_memcfg_shard={self._shard_shape_str(persistent_interim_buffer.memory_config())}"
-            )
-            self._logged_decode_rs_create_heads = True
         (
             q_heads_pre_rot_1BQD,
             k_heads_pre_rot_1BKD,
@@ -1156,18 +1060,7 @@ class TT_CCL:
             self.gather_idx[cluster_axis] = (self.gather_idx[cluster_axis] + 1) % self.num_cbs
 
         else:
-            if self.is_qwen and not self.model_config.get("USE_PREFETCHER", True) and self.use_host_col_ccl:
-                # BH fabric has no column-axis connection: do the reduce-scatter on host.
-                ttnn_tensor_out = self.line_reduce_scatter_host(
-                    input_tensor_mesh,
-                    memory_config,
-                    dim,
-                    cluster_axis,
-                    num_links=num_links,
-                    math_op=math_op,
-                )
-                self.gather_idx[cluster_axis] = (self.gather_idx[cluster_axis] + 1) % self.num_cbs
-            elif self.is_qwen and not self.model_config.get("USE_PREFETCHER", True):
+            if self.is_qwen and not self.model_config.get("USE_PREFETCHER", True):
                 ttnn_tensor_out = ttnn.reduce_scatter(
                     input_tensor_mesh,
                     dim,
@@ -1301,17 +1194,6 @@ class TT_CCL:
                     )
 
         else:
-            if self.is_qwen and not self.model_config.get("USE_PREFETCHER", True) and self.use_host_col_ccl:
-                # BH fabric has no column-axis connection: do the all-gather on host.
-                ttnn_tensor_out = self.line_all_gather_host(
-                    input_tensor_mesh,
-                    dim,
-                    cluster_axis,
-                    memory_config,
-                    num_links=num_links,
-                )
-                self.gather_idx[cluster_axis] = (self.gather_idx[cluster_axis] + 1) % self.num_cbs
-                return ttnn_tensor_out
             topology = self.model_config["CCL_TOPOLOGY"]
             assert buffer_key is not None, "buffer_key is None"
             persistent_buffer = self.all_gather_buffers.get(buffer_key, None)
@@ -1515,99 +1397,7 @@ class TT_CCL:
         batch_first=False,
     ):
         # Non-experimental fallback path: all-gather heads, then concatenate heads.
-        try:
-            input_shape = tuple(input_tensor_mesh.shape)
-        except Exception:
-            input_shape = "unknown"
-        try:
-            input_memcfg_shard = self._shard_shape_str(input_tensor_mesh.memory_config())
-        except Exception:
-            input_memcfg_shard = "N/A"
-        if (
-            self.mode == "decode"
-            and self.is_qwen
-            and dim == 1
-            and not self.model_config.get("USE_PREFETCHER", False)
-            and not self.use_old_all_gather_concat
-        ):
-            head_dim = input_tensor_mesh.shape[3]
-            if batch_first:
-                # Device SDPA: input is [1, B_local, H_local, D] (batch on cols, heads on rows).
-                # Gather heads over rows (axis0 -> dim2) and users over cols (axis1 -> dim1).
-                host_sdpa = ttnn.to_torch(
-                    input_tensor_mesh,
-                    mesh_composer=ttnn.ConcatMesh2dToTensor(
-                        self.mesh_device, dims=(2, 1), mesh_shape=self.cluster_shape
-                    ),
-                )  # [1, B_global, H_global, D]
-                global_batch = input_tensor_mesh.shape[1] * self.cluster_shape[1]
-                global_heads = num_heads * self.cluster_shape[0]
-                host_sdpa = host_sdpa[:, :global_batch, :global_heads, :head_dim].contiguous()
-                # already [1, batch, heads, D] -> concat heads on width, no permute needed
-                host_concat = host_sdpa.reshape(1, 1, global_batch, global_heads * head_dim)
-            else:
-                # Host-simple SDPA: input is [1, H_local, B_local, D] (heads on rows, batch on cols).
-                host_sdpa = ttnn.to_torch(
-                    input_tensor_mesh,
-                    mesh_composer=ttnn.ConcatMesh2dToTensor(
-                        self.mesh_device, dims=(1, 2), mesh_shape=self.cluster_shape
-                    ),
-                )
-                global_heads = num_heads * self.cluster_shape[0]
-                global_batch = input_tensor_mesh.shape[2] * self.cluster_shape[1]
-                host_sdpa = host_sdpa[:, :global_heads, :global_batch, :head_dim].contiguous()
-                host_concat = host_sdpa.permute(0, 2, 1, 3).reshape(1, 1, global_batch, global_heads * head_dim)
-            logger.info(
-                f"[qwen-attn-trace] all_gather_concat: host assembled decode WO input "
-                f"from shape={tuple(host_sdpa.shape)} to shape={tuple(host_concat.shape)}"
-            )
-            return ttnn.from_torch(
-                host_concat,
-                device=self.mesh_device,
-                mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh_device),
-                dtype=input_tensor_mesh.get_dtype(),
-                layout=ttnn.TILE_LAYOUT,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            )
-        if (
-            self.mode == "decode"
-            and self.is_qwen
-            and dim == 1
-            and not self.model_config.get("USE_PREFETCHER", False)
-            and self.use_old_all_gather_concat
-        ):
-            logger.info("[qwen-attn-trace] all_gather_concat: using old experimental all_gather_concat path")
-            logger.info(
-                "[qwen-attn-trace] all_gather_concat experimental config: "
-                f"input=({self._tensor_config_str(input_tensor_mesh)}), "
-                f"intermediate=({self._tensor_config_str(self.all_gather_concat_inter_tensor[0])}), "
-                f"dim={dim}, cluster_axis={cluster_axis}, topology={self.model_config['CCL_TOPOLOGY']}, "
-                f"num_links={num_links}, num_heads={num_heads}, output_mem={self._memory_config_str(memory_config)}, "
-                f"subdevice_id={self.worker_sub_device_id}, gather_idx={self.gather_idx[cluster_axis]}, "
-                f"use_noc1_only={use_noc1_only}"
-            )
-            ttnn_tensor_out = ttnn.experimental.all_gather_concat(
-                input_tensor_mesh,
-                self.all_gather_concat_inter_tensor[0],
-                dim,
-                cluster_axis=cluster_axis,
-                mesh_device=self.mesh_device,
-                topology=self.model_config["CCL_TOPOLOGY"],
-                multi_device_global_semaphore=self.gather_semaphore_handles[cluster_axis][
-                    self.gather_idx[cluster_axis]
-                ],
-                num_links=num_links,
-                num_heads=num_heads,
-                memory_config=memory_config,
-                subdevice_id=self.worker_sub_device_id,
-                use_noc1_only=use_noc1_only,
-            )
-            self.gather_idx[cluster_axis] = (self.gather_idx[cluster_axis] + 1) % self.num_cbs
-            return ttnn_tensor_out
-        if num_links != 1:
-            logger.info(
-                f"[qwen-attn-trace] all_gather_concat: overriding requested num_links={num_links} -> 1 for decode stability"
-            )
+        # num_links is forced to 1 for decode stability.
         effective_num_links = 1
         gather_dim = dim
         gather_memory_config = memory_config
@@ -1617,11 +1407,6 @@ class TT_CCL:
             # users/head axes below before invoking the concat op.
             gather_memory_config = self.model_config["GATHER_USERS_MEMCFG"](self.cluster_shape[1])
         buffer_key = "SDPA" if self.mode == "decode" else None
-        logger.info(
-            f"[qwen-attn-trace] all_gather_concat: start line_all_gather (cluster_axis={cluster_axis}, dim={gather_dim}, "
-            f"num_links={effective_num_links}, input_shape={input_shape}, "
-            f"input_memcfg_shard={input_memcfg_shard}, output_memcfg_shard={self._shard_shape_str(gather_memory_config)})"
-        )
         gathered = self.line_all_gather(
             input_tensor_mesh,
             dim=gather_dim,
@@ -1631,17 +1416,13 @@ class TT_CCL:
             buffer_key=buffer_key,
             use_subdevice=True,
         )
-        logger.info("[qwen-attn-trace] all_gather_concat: done line_all_gather")
 
         if self.mode == "decode":
             concat_heads_op = ttnn.experimental.nlp_concat_heads_decode
-            concat_heads_op_name = "ttnn.experimental.nlp_concat_heads_decode"
         else:
             concat_heads_op = getattr(ttnn, "nlp_concat_heads", None)
-            concat_heads_op_name = "ttnn.nlp_concat_heads"
             if concat_heads_op is None:
                 concat_heads_op = ttnn.experimental.nlp_concat_heads
-                concat_heads_op_name = "ttnn.experimental.nlp_concat_heads"
 
         concat_input = gathered
         if self.mode == "decode" and dim == 1:
@@ -1658,7 +1439,6 @@ class TT_CCL:
                 # nlp_concat_heads does not accept WIDTH_SHARDED input.
                 concat_input = gathered
 
-        logger.info(f"[qwen-attn-trace] all_gather_concat: start concat via {concat_heads_op_name}")
         decode_concat_sub_core_grids = None
         if self.mode == "decode":
             try:
@@ -1722,102 +1502,9 @@ class TT_CCL:
                 )
             else:
                 ttnn_tensor_out = concat_heads_op(concat_input, memory_config=memory_config)
-        logger.info(f"[qwen-attn-trace] all_gather_concat: done concat via {concat_heads_op_name}")
         if concat_input is not gathered:
             concat_input.deallocate(True)
         gathered.deallocate(True)
-        return ttnn_tensor_out
-
-    def line_all_reduce_host(self, input_tensor_mesh, cluster_axis, num_links, memory_config):
-        dim = 3
-
-        ##### Host side implementation #####
-        rs_output_tensor_mesh = self.line_reduce_scatter_host(
-            input_tensor_mesh,
-            memory_config,
-            dim,
-            cluster_axis,
-            num_links=num_links,
-            math_op=ttnn.ReduceType.Sum,
-        )
-
-        output_tensor_mesh = self.line_all_gather_host(
-            rs_output_tensor_mesh,
-            dim,
-            cluster_axis,
-            memory_config,
-            num_links=num_links,
-        )
-
-        return output_tensor_mesh
-
-    def line_reduce_scatter_host(
-        self, input_tensor_mesh, memory_config, dim, cluster_axis, num_links=1, math_op=ttnn.ReduceType.Sum
-    ):
-        ##### Host side implementation #####
-        dims = [0, 1]
-        dtype = input_tensor_mesh.get_dtype()
-        # Reading a padded width-sharded (ring) L1 tensor via to_torch can return garbage/NaN/Inf
-        # for the logical data; go through DRAM interleaved first for a clean readback.
-        input_dram = ttnn.to_memory_config(input_tensor_mesh, ttnn.DRAM_MEMORY_CONFIG)
-        torch_tensor_mesh = ttnn.to_torch(
-            input_dram, mesh_composer=ttnn.ConcatMesh2dToTensor(self.mesh_device, dims=dims, mesh_shape=(8, 4))
-        )
-        # Tile/shard padding columns can still come back as NaN/Inf (matmul never wrote them); the
-        # device CCL ignores padding, so zero it before the cross-device reduction.
-        torch_tensor_mesh = torch.nan_to_num(torch_tensor_mesh, nan=0.0, posinf=0.0, neginf=0.0)
-        if os.getenv("QWEN_HOST_CCL_DEBUG", "0") == "1":
-            logger.info(
-                f"[host-rs] in shape={tuple(torch_tensor_mesh.shape)} cluster_axis={cluster_axis} dim={dim} "
-                f"mean_abs={float(torch_tensor_mesh.abs().mean()):.6e} max_abs={float(torch_tensor_mesh.abs().max()):.6e}"
-            )
-
-        torch_tensor_mesh = torch.sum(torch_tensor_mesh, dim=cluster_axis, keepdim=True)
-
-        dims[cluster_axis] = dim
-        # Build in DRAM (interleaved) first: writing directly into a width-sharded L1 memcfg
-        # whose shard grid does not exactly match this tensor's width mis-places the logical
-        # data (leaving it zero / reading padding). to_memory_config does the tilize+shard+pad
-        # correctly.
-        ttnn_tensor_out = ttnn.from_torch(
-            torch_tensor_mesh,
-            device=self.mesh_device,
-            mesh_mapper=ttnn.ShardTensor2dMesh(self.mesh_device, dims=dims, mesh_shape=(8, 4)),
-            dtype=dtype,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            layout=ttnn.TILE_LAYOUT,
-        )
-        if memory_config is not None:
-            ttnn_tensor_out = ttnn.to_memory_config(ttnn_tensor_out, memory_config)
-
-        return ttnn_tensor_out
-
-    def line_all_gather_host(self, input_tensor_mesh, dim, cluster_axis, memory_config, num_links=1):
-        ##### Host side implementation #####
-        dims = [0, 0] if dim != 0 else [1, 1]
-        dims[cluster_axis] = dim
-        dtype = input_tensor_mesh.get_dtype()
-        # Clean readback through DRAM interleaved (see line_reduce_scatter_host).
-        input_dram = ttnn.to_memory_config(input_tensor_mesh, ttnn.DRAM_MEMORY_CONFIG)
-        torch_tensor_mesh = ttnn.to_torch(
-            input_dram, mesh_composer=ttnn.ConcatMesh2dToTensor(self.mesh_device, dims=dims, mesh_shape=(8, 4))
-        )
-        # Neutralize NaN/Inf padding columns before re-sharding (see line_reduce_scatter_host).
-        torch_tensor_mesh = torch.nan_to_num(torch_tensor_mesh, nan=0.0, posinf=0.0, neginf=0.0)
-
-        dims[cluster_axis] = None
-        # Build in DRAM first, then convert (see line_reduce_scatter_host).
-        ttnn_tensor_out = ttnn.from_torch(
-            torch_tensor_mesh,
-            device=self.mesh_device,
-            mesh_mapper=ttnn.ShardTensor2dMesh(self.mesh_device, dims=dims, mesh_shape=(8, 4)),
-            dtype=dtype,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            layout=ttnn.TILE_LAYOUT,
-        )
-        if memory_config is not None:
-            ttnn_tensor_out = ttnn.to_memory_config(ttnn_tensor_out, memory_config)
-
         return ttnn_tensor_out
 
     def close(self):

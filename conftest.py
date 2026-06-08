@@ -649,6 +649,13 @@ def open_mesh_device_with_fabric(
 
     fabric_ready = False
     if fabric_config and not defer_fabric_until_after_open:
+        # Current main maps the fabric mesh graph against the discovered physical topology at
+        # set_fabric_config time. If the cluster has not been enumerated yet the solver only sees
+        # 1 node and fails ("Graph specified in MGD could not fit ..."). Trigger discovery first
+        # (matches upstream conftest, which calls get_pcie_device_ids/get_num_devices before
+        # set_fabric). The old BH-Galaxy issue where enumeration closed the cluster is fixed upstream.
+        safe_get_num_devices()
+        safe_get_pcie_device_ids()
         fabric_ready = try_set_fabric(
             fabric_config, reliability_mode, fabric_tensix_config, fabric_manager, fabric_router_config
         )
@@ -745,7 +752,11 @@ def mesh_device(request, silicon_arch_name, device_params):
         fabric_tensix_config,
         fabric_manager,
         fabric_router_config,
-        defer_fabric_until_after_open=is_bh_galaxy,
+        # Current main requires fabric to be configured BEFORE the mesh is open
+        # (post-open set_fabric_config now raises `!devices_still_open`), and it also fixed the
+        # old BH-Galaxy pre-open cluster-close issue that motivated deferral. So always try
+        # pre-open; the wrapper still falls back to a post-open attempt if pre-open fails.
+        defer_fabric_until_after_open=False,
     )
 
     if not is_bh_galaxy:

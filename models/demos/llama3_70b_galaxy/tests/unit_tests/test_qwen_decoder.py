@@ -22,38 +22,10 @@ from models.demos.llama3_70b_galaxy.tt.prefetcher_common import TtLlamaPrefetche
 from models.demos.llama3_70b_galaxy.tt.llama_ccl import TT_CCL
 
 
-# On a machine with working column-axis (ring) fabric, run the MLP/norm column-axis collectives on
-# device (QWEN_MLP_HOST_CCL=0) instead of the lossy host fallback.
-#
-# Fabric selection:
-#   QWEN_FABRIC overrides everything and accepts one of:
-#     1d | 1d_ring | 2d | 2d_torus_x | 2d_torus_y | 2d_torus_xy
-#   Otherwise QWEN_USE_RING_FABRIC=1 maps to FABRIC_1D_RING (legacy), default is `True` (FABRIC_1D).
-#
-# Note: a 2-axis mesh (8x4) that needs collectives on BOTH cluster_axis=0 and cluster_axis=1
-# requires a 2D fabric. FABRIC_1D / FABRIC_1D_RING only build routing for a single line, so the
-# cross-column (cluster_axis=1) collective throws `IndexError: map::at`. Use 2d_torus_xy on a
-# full 2D-torus machine.
-def _resolve_qwen_fabric_config():
-    fabric_map = {
-        "1d": ttnn.FabricConfig.FABRIC_1D,
-        "1d_ring": ttnn.FabricConfig.FABRIC_1D_RING,
-        "2d": ttnn.FabricConfig.FABRIC_2D,
-        "2d_torus_x": ttnn.FabricConfig.FABRIC_2D_TORUS_X,
-        "2d_torus_y": ttnn.FabricConfig.FABRIC_2D_TORUS_Y,
-        "2d_torus_xy": ttnn.FabricConfig.FABRIC_2D_TORUS_XY,
-    }
-    explicit = os.getenv("QWEN_FABRIC", "").strip().lower()
-    if explicit:
-        if explicit not in fabric_map:
-            raise ValueError(f"Unknown QWEN_FABRIC={explicit!r}; valid: {sorted(fabric_map)}")
-        return fabric_map[explicit]
-    if os.getenv("QWEN_USE_RING_FABRIC", "0") == "1":
-        return ttnn.FabricConfig.FABRIC_1D_RING
-    return True
-
-
-_QWEN_DECODER_FABRIC_CONFIG = _resolve_qwen_fabric_config()
+# The 8x4 Blackhole Galaxy decode path runs all column-axis (cluster_axis=1) and row-axis
+# (cluster_axis=0) collectives on device. That requires a 2D-torus fabric: FABRIC_1D / FABRIC_1D_RING
+# only build routing for a single line, so the cross-column collective throws `IndexError: map::at`.
+_QWEN_DECODER_FABRIC_CONFIG = ttnn.FabricConfig.FABRIC_2D_TORUS_XY
 
 
 @torch.no_grad()

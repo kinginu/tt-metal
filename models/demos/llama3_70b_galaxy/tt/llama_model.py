@@ -112,6 +112,9 @@ class TtTransformer(LightweightModule):
             args,
             tt_ccl=self.tt_ccl,
             ccl_topology=self.model_config["CCL_TOPOLOGY"],
+            # Match the decoder layers: BH no-prefetch uses the distributed (non-sharded) decode
+            # norm path; the sharded fused decode norm is prefetcher-only.
+            use_sharded_decode=getattr(args, "use_prefetcher", True) or not getattr(args, "is_blackhole", False),
         )
 
         state_dict_prefix = args.get_state_dict_prefix("", None)
@@ -903,6 +906,7 @@ class TtTransformer(LightweightModule):
         if mode == "decode" and self.use_prefetcher:
             ttnn.deallocate(garbage_tensor)
 
+        if mode == "decode":
             # Pre-allocated output of AllReduce in LM Head to avoid memory cloberring
             self.tt_ccl.tt_lm_head_buffer_l1 = ttnn.to_memory_config(
                 self.tt_ccl.tt_lm_head_buffer, self.tt_ccl.lm_head_buffer_mem_cfg

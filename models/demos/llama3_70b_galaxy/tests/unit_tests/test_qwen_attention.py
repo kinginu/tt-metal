@@ -26,6 +26,12 @@ PAGED_ATTENTION_CASES = (PAGED_ATTENTION_DEBUG_FLAG,)
 PAGED_ATTENTION_IDS = ("paged_attention" if PAGED_ATTENTION_DEBUG_FLAG else "default_attention",)
 
 
+# The 8x4 Blackhole Galaxy decode path runs column-axis (cluster_axis=1) collectives on device, which
+# requires a 2D-torus fabric (FABRIC_1D / FABRIC_1D_RING throw `IndexError: map::at` on the cross-column
+# route).
+_QWEN_ATTENTION_FABRIC_CONFIG = ttnn.FabricConfig.FABRIC_2D_TORUS_XY
+
+
 def _decode_input_memcfg(model_args, force_replicated_input):
     """Match activation sharding to QKV matmul mode (dram=column, ring=prefetcher NOC1 grid)."""
     if force_replicated_input:
@@ -92,7 +98,7 @@ def _decode_pos_tensor(pos, batch_size, mesh_device, cluster_shape):
     [
         {
             "dispatch_core_axis": ttnn.DispatchCoreAxis.COL,
-            "fabric_config": True,
+            "fabric_config": _QWEN_ATTENTION_FABRIC_CONFIG,
         }
     ],
     indirect=True,
@@ -239,13 +245,7 @@ def test_qwen_attention_inference(
         prefetcher_setup=prefetcher_setup,
         tt_ccl=tt_ccl,
     )
-    use_host_ref_decode = os.getenv("QWEN_HOST_DECODE_FALLBACK", "0") == "1"
     qkv_stage_debug = os.getenv("QWEN_QKV_STAGE_DEBUG", "0") == "1"
-    if use_host_ref_decode:
-        logger.info(
-            "QWEN_HOST_DECODE_FALLBACK=1: decode uses torch reference on gathered input "
-            "(host SDPA+WO still run only when fallback=0)"
-        )
     if qkv_stage_debug:
         logger.info("QWEN_QKV_STAGE_DEBUG=1: will PCC-check TT Q/K after rope vs torch reference")
 
@@ -257,7 +257,7 @@ def test_qwen_attention_inference(
         model_args.rope_scaling_factor,
     )
     freqs_cis = torch.complex(cos, sin)
-    if use_host_ref_decode or qkv_stage_debug:
+    if qkv_stage_debug:
         tt_model.host_reference_attn = reference_model
         tt_model.host_freqs_cis = freqs_cis
 
@@ -311,7 +311,7 @@ def test_qwen_attention_inference(
         pt_attention_input = torch.randn(batch_size, seq_len, model_args.dim) * 0.05
 
         tt_attention_input = pt_attention_input.clone()
-        if use_host_ref_decode or qkv_stage_debug:
+        if qkv_stage_debug:
             tt_model.host_input_golden = pt_attention_input
 
         attention_input = model_args.prepare_residual_tensor_decode(
