@@ -551,9 +551,10 @@ class SeedManager:
 
     Tracks which users have explicit seeds set (``_seed_active``) and avoids
     unnecessary host-to-device copies during decode when no seeds are active.
-    On the first call after a reset with no active seeds, pushes MAX_UINT32
-    (SKIP) values so the device skips ``rand_tile_init``, then skips all
-    subsequent decode pushes until the next ``reset_seed``.
+    On the first call after a reset with no active seeds, pushes random
+    non-zero per-user values to initialize device RNG state, then pushes
+    MAX_UINT32 (SKIP) once so subsequent decode steps advance on device
+    without redundant host-to-device seed copies.
     """
 
     def __init__(self, tt_sampling, max_batch_size=32):
@@ -583,6 +584,21 @@ class SeedManager:
             )
         else:
             self._seed_mapper = None
+
+    @staticmethod
+    def _device_seed_value(seed: int, *, allow_skip: bool = False) -> int:
+        """Return a seed value that is safe to pass to device sampling.
+
+        Device sampling reserves seed=0 in its RNG path; keep that value out
+        of runtime seed tensors so public SamplingParams(seed=0) remains
+        deterministic.
+        """
+        seed = int(seed)
+        if seed == MAX_UINT32:
+            return MAX_UINT32 if allow_skip else MAX_UINT32 - 1
+        if seed == 0:
+            return 1
+        return seed
 
     def apply_slot_remap(self, remap):
         """Reindex RNG state after batch condense.
@@ -666,7 +682,9 @@ class SeedManager:
                 # State 1 (init): must take precedence over a pending
                 # transition so a new prefill always refreshes the device
                 # RNG with varied per-user values.
-                new_seeds = [random.randint(0, 1000000) for _ in range(self.max_batch_size)]
+                new_seeds = [
+                    self._device_seed_value(random.randint(0, 1000000)) for _ in range(self.max_batch_size)
+                ]
                 self._needs_skip = True
             elif self._needs_skip:
                 # State 2 (transition): push SKIP so the device stops calling
@@ -679,7 +697,10 @@ class SeedManager:
                 return
         else:
             # Advance RNG for each user in empty_slots; non-active slots get MAX_UINT32.
-            new_seeds = [rng.randint(0, 1000000) if i in empty_slots else MAX_UINT32 for i, rng in enumerate(self.rngs)]
+            new_seeds = [
+                self._device_seed_value(rng.randint(0, 1000000)) if i in empty_slots else MAX_UINT32
+                for i, rng in enumerate(self.rngs)
+            ]
             if replicate_seeds:
                 assert len(empty_slots) == 1, "Cannot replicate seeds if empty_slots is not length 1"
                 new_seeds = self.max_batch_size * [new_seeds[empty_slots[0]]]

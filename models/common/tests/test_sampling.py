@@ -1,14 +1,73 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent USA, Inc.
 # SPDX-License-Identifier: Apache-2.0
 
+from types import SimpleNamespace
+
 import pytest
 import torch
 import torch.nn.functional as F
 
 import ttnn
+import models.common.sampling.generator as sampling_generator_module
 from models.common.sampling import LogProbsCalculator
+from models.common.sampling.generator import MAX_UINT32, SeedManager
 from models.common.sampling.tt_log_probs import MAX_TOP_LOGPROBS, LogProbsResult
 from models.common.utility_functions import comp_pcc
+
+
+# ---------------------------------------------------------------------------
+# SeedManager host-side tests
+# ---------------------------------------------------------------------------
+class _ZeroRng:
+    def randint(self, _low, _high):
+        return 0
+
+
+def _make_seed_manager_for_host_tests(max_batch_size=4):
+    fake_tt_sampling = SimpleNamespace(
+        _sampling_dp=1,
+        seeds_tt_tensor=object(),
+    )
+    return SeedManager(fake_tt_sampling, max_batch_size=max_batch_size)
+
+
+def _capture_seed_uploads(monkeypatch):
+    uploads = []
+
+    def fake_from_torch(tensor, **_kwargs):
+        uploads.append(tensor.clone())
+        return tensor
+
+    monkeypatch.setattr(sampling_generator_module.ttnn, "from_torch", fake_from_torch)
+    monkeypatch.setattr(sampling_generator_module.ttnn, "copy_host_to_device_tensor", lambda *_args, **_kwargs: None)
+    return uploads
+
+
+def test_seed_manager_never_uploads_zero_for_explicit_seed_zero(monkeypatch):
+    uploads = _capture_seed_uploads(monkeypatch)
+    manager = _make_seed_manager_for_host_tests()
+
+    manager.reset_seed([0], [0])
+    manager.rngs[0] = _ZeroRng()
+    manager.get_new_values(empty_slots=[0])
+
+    assert manager.seeds[0] == 0
+    assert uploads[-1].tolist() == [1, MAX_UINT32, MAX_UINT32, MAX_UINT32]
+
+
+def test_seed_manager_never_uploads_zero_for_unseeded_random_init(monkeypatch):
+    uploads = _capture_seed_uploads(monkeypatch)
+    monkeypatch.setattr(sampling_generator_module.random, "randint", lambda _low, _high: 0)
+    manager = _make_seed_manager_for_host_tests()
+
+    manager.reset_seed([None], [0])
+    manager.get_new_values()
+
+    assert uploads[-1].tolist() == [1, 1, 1, 1]
+
+    manager.get_new_values()
+
+    assert uploads[-1].tolist() == [MAX_UINT32] * 4
 
 
 # ---------------------------------------------------------------------------

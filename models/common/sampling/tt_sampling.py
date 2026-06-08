@@ -226,7 +226,7 @@ class TTSampling(LightweightModule):
         # When sampling_dp > 1, shard across rows so each row gets its own slice.
         # user_ids tensor: core routing only (32 per row, replicated).
         self.seeds_tt_tensor = ttnn.from_torch(
-            torch.arange(total_param_size).to(torch.uint32),
+            torch.full((total_param_size,), torch.iinfo(torch.uint32).max, dtype=torch.uint32),
             device=self.mesh_device,
             dtype=ttnn.uint32,
             layout=ttnn.ROW_MAJOR_LAYOUT,
