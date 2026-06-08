@@ -51,6 +51,10 @@ class TtPrefillPipelineConfig:
     shared_expert_activations_dtype: ttnn.DataType = ttnn.bfloat16
     shared_expert_weights_dtype: ttnn.DataType = ttnn.bfloat8_b
     weight_cache_path: Optional[Path] = None
+    # When True, the last transformer layer runs kv-only: it fills the KV cache
+    # (which migration needs) and skips its Q/SDPA/output projection, FFN/MoE,
+    # the final RMSNorm, and the LM head. `prefill()` then returns None.
+    kv_only_last_layer: bool = False
 
     @property
     def sp_factor(self) -> int:
@@ -121,6 +125,7 @@ class TtDeepSeekPrefillPipeline:
             shared_expert_weights_dtype=self.config.shared_expert_weights_dtype,
             weight_cache_path=self.config.weight_cache_path,
             lm_head_is_column_parallel=True,
+            kv_only_last_layer=self.config.kv_only_last_layer,
         )
         self.model_built = True
 
@@ -139,10 +144,6 @@ class TtDeepSeekPrefillPipeline:
     def compile(self) -> None:
         assert self.model_built and self.kv_cache_allocated
         max_seq_len = self.config.max_seq_len
-        logger.warning(
-            "TtDeepSeekPrefillPipeline: temperature is hardcoded to 0.0 (greedy argmax). "
-            "Sampling is not yet supported — every prefill() returns the argmax token."
-        )
         logger.info(f"TtDeepSeekPrefillPipeline.compile() — warming up with {max_seq_len} tokens")
         t0 = time.perf_counter()
         tt_token_ids = self._prepare_input_tensor([0] * max_seq_len)
@@ -162,7 +163,14 @@ class TtDeepSeekPrefillPipeline:
         slot_id: int,
         actual_isl: Optional[int] = None,
         dst_slot: Optional[int] = None,
-    ) -> int:
+    ) -> Optional[int]:
+        """Run one prefill iteration.
+
+        Returns the first-token id sampled from the LM head, OR `None` when
+        `kv_only_last_layer` is set on the config — in that mode the last layer's
+        compute is stripped down to the KV cache fill (which migration consumes)
+        and no token is produced.
+        """
         assert self.compiled, "Call compile() before prefill()"
         if actual_isl is None:
             actual_isl = len(token_ids)
@@ -179,7 +187,7 @@ class TtDeepSeekPrefillPipeline:
             on_layer_complete=on_layer_complete,
             temperature=0.0,
         )
-        return int(first_token_id)
+        return None if first_token_id is None else int(first_token_id)
 
     def _prepare_input_tensor(self, token_ids: list[int]) -> ttnn.Tensor:
         sp_factor = self.config.sp_factor
