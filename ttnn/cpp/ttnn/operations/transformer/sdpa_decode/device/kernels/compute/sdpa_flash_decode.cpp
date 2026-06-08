@@ -216,9 +216,10 @@ void kernel_main() {
             compute_kernel_lib::tilize_config::InitUninitMode::InitAndUninit,
             compute_kernel_lib::tilize_config::WaitMode::WaitBlock,
             compute_kernel_lib::tilize_config::ReconfigureRegisterDatatypeMode::NoReconfigure>(1);
-        mm_init_short(cb_q_in, cb_k_in);
+        matmul_init(cb_q_in, cb_k_in);
     } else {
-        mm_init(cb_q_in, cb_k_in, cb_qk_im);
+        compute_kernel_hw_startup<SrcOrder::Reverse>(cb_q_in, cb_k_in, cb_qk_im);
+        matmul_init(cb_q_in, cb_k_in);
     }
     cb_wait_front(cb_q_in, q_chunk_tiles);
 
@@ -327,176 +328,176 @@ void kernel_main() {
 
             // OPTIMIZATION: Add the attention mask directly on top of DST if chunk sizes are dynamic
 #ifdef DYNAMIC_CHUNK_SIZE
-                bool add_causal_mask_fusion = is_causal && k_chunk == k_chunk_end - 1 && apply_mask_at_last_chunk;
-                bool add_sliding_window_mask_fusion = k_chunk == window_start_chunk && window_start_unaligned > 0;
-                bool add_mask_fusion = add_causal_mask_fusion || use_attention_mask || add_sliding_window_mask_fusion;
+            bool add_causal_mask_fusion = is_causal && k_chunk == k_chunk_end - 1 && apply_mask_at_last_chunk;
+            bool add_sliding_window_mask_fusion = k_chunk == window_start_chunk && window_start_unaligned > 0;
+            bool add_mask_fusion = add_causal_mask_fusion || use_attention_mask || add_sliding_window_mask_fusion;
 #else
-                bool add_mask_fusion = false;
-                bool add_sliding_window_mask_fusion = false;
+            bool add_mask_fusion = false;
+            bool add_sliding_window_mask_fusion = false;
 #endif
 
-                /* QK = Q_CHUNK @ K_CHUNK */
-                // Determine which mask buffer to use for fusion
-                uint32_t mask_cb_to_use = cb_mask_in;  // Default to causal mask buffer
-                if (add_sliding_window_mask_fusion) {
-                    mask_cb_to_use = cb_sliding_window_mask_in;  // Use sliding window mask buffer
-                }
+            /* QK = Q_CHUNK @ K_CHUNK */
+            // Determine which mask buffer to use for fusion
+            uint32_t mask_cb_to_use = cb_mask_in;  // Default to causal mask buffer
+            if (add_sliding_window_mask_fusion) {
+                mask_cb_to_use = cb_sliding_window_mask_in;  // Use sliding window mask buffer
+            }
 
-                matmul_blocks(
-                    cb_q_in,
-                    cb_k_in,
-                    cb_qk_im,
-                    Sq_chunk_t,
-                    Sk_chunk_t_dynamic,
-                    DHt,
-                    qk_num_blocks,
-                    qk_in0_num_subblocks_dynamic,
-                    qk_in1_num_subblocks_dynamic,
-                    qk_in0_block_w,
-                    qk_subblock_h_dynamic,
-                    qk_subblock_w_dynamic,
-                    true,
-                    add_mask_fusion,
-                    mask_cb_to_use,
-                    cb_zero_in);
+            matmul_blocks(
+                cb_q_in,
+                cb_k_in,
+                cb_qk_im,
+                Sq_chunk_t,
+                Sk_chunk_t_dynamic,
+                DHt,
+                qk_num_blocks,
+                qk_in0_num_subblocks_dynamic,
+                qk_in1_num_subblocks_dynamic,
+                qk_in0_block_w,
+                qk_subblock_h_dynamic,
+                qk_subblock_w_dynamic,
+                true,
+                add_mask_fusion,
+                mask_cb_to_use,
+                cb_zero_in);
 
-                /* QK += MASK */
-                // Apply block padding mask for every chunk when block_size < TILE_HEIGHT.
-                // Uses <false> to NOT pop the mask CB so it can be reused for subsequent chunks.
-                // Applied outside mask_fusion conditional since it's always needed independently.
-                if constexpr (has_block_padding) {
-                    reconfig_data_format(cb_qk_im, cb_block_pad_mask);
-                    add_block_inplace<false>(cb_qk_im, cb_block_pad_mask, qk_chunk_tiles_dynamic);
-                }
+            /* QK += MASK */
+            // Apply block padding mask for every chunk when block_size < TILE_HEIGHT.
+            // Uses <false> to NOT pop the mask CB so it can be reused for subsequent chunks.
+            // Applied outside mask_fusion conditional since it's always needed independently.
+            if constexpr (has_block_padding) {
+                reconfig_data_format(cb_qk_im, cb_block_pad_mask);
+                add_block_inplace<false>(cb_qk_im, cb_block_pad_mask, qk_chunk_tiles_dynamic);
+            }
 
-                if (!add_mask_fusion) {
-                    if constexpr (is_causal) {
-                        // For decode, we only apply mask at the last chunk for causal mode
-                        if (k_chunk == k_chunk_end - 1 && apply_mask_at_last_chunk) {
-                            reconfig_data_format(cb_qk_im, cb_mask_in);
-                            add_block_inplace<false>(cb_qk_im, cb_mask_in, qk_chunk_tiles_dynamic);
-                        }
-                    } else {
-                        if constexpr (use_attention_mask) {
-                            reconfig_data_format(cb_qk_im, cb_mask_in);
-                            add_block_inplace<true>(cb_qk_im, cb_mask_in, qk_chunk_tiles_dynamic);
-                        }
+            if (!add_mask_fusion) {
+                if constexpr (is_causal) {
+                    // For decode, we only apply mask at the last chunk for causal mode
+                    if (k_chunk == k_chunk_end - 1 && apply_mask_at_last_chunk) {
+                        reconfig_data_format(cb_qk_im, cb_mask_in);
+                        add_block_inplace<false>(cb_qk_im, cb_mask_in, qk_chunk_tiles_dynamic);
                     }
-
-                    // Apply sliding window mask to the first chunk (only on the core that processes it)
-                    if (k_chunk == window_start_chunk && window_start_unaligned > 0) {
-                        reconfig_data_format(cb_qk_im, cb_sliding_window_mask_in);
-                        add_block_inplace<false>(cb_qk_im, cb_sliding_window_mask_in, qk_chunk_tiles_dynamic);
+                } else {
+                    if constexpr (use_attention_mask) {
+                        reconfig_data_format(cb_qk_im, cb_mask_in);
+                        add_block_inplace<true>(cb_qk_im, cb_mask_in, qk_chunk_tiles_dynamic);
                     }
                 }
 
-                /**
-                 * OPTIMIZATION
-                 * Typically, scores are multiplied by a scalar here, but an optimization was employed
-                 * where the scaling is fused into exp both in exp(x - max) and exp(prev_max - cur_max).
-                 * This gives us scaling for free on the performance-critical exp(x - max) computation.
-                 */
+                // Apply sliding window mask to the first chunk (only on the core that processes it)
+                if (k_chunk == window_start_chunk && window_start_unaligned > 0) {
+                    reconfig_data_format(cb_qk_im, cb_sliding_window_mask_in);
+                    add_block_inplace<false>(cb_qk_im, cb_sliding_window_mask_in, qk_chunk_tiles_dynamic);
+                }
+            }
 
-                reconfig_data_format(cb_qk_im, cb_identity_scale_in);
-                pack_reconfig_data_format(cb_cur_max);
+            /**
+             * OPTIMIZATION
+             * Typically, scores are multiplied by a scalar here, but an optimization was employed
+             * where the scaling is fused into exp both in exp(x - max) and exp(prev_max - cur_max).
+             * This gives us scaling for free on the performance-critical exp(x - max) computation.
+             */
 
-                /**
-                 * OPTIMIZATION
-                 * reduce_c can perform both reduce_max and eltwise max with previous result.
-                 * if do_eltwise_max:
-                 *  cur_max = eltwise_max(prev_max, max(qk, dim=-1))
-                 * else:
-                 *  cur_max = max(qk, dim=-1)
-                 */
-                reduce_c<PoolType::MAX, ReduceDim::REDUCE_ROW, cb_qk_im, cb_identity_scale_in, Sq_chunk_t, vector_mode>(
-                    cb_cur_max, cb_prev_max, Sk_chunk_t_dynamic, k_chunk > k_chunk_start);
-                /* QK -= cb_cur_max */
-                /* QK = exp(QK)*/
-                reconfig_data_format(cb_qk_im, cb_cur_max);
-                pack_reconfig_data_format(cb_qk_im);
+            reconfig_data_format(cb_qk_im, cb_identity_scale_in);
+            pack_reconfig_data_format(cb_cur_max);
 
-                /**
-                 * sub_exp performs `QK = exp((QK - cur_max) * scale)`
-                 */
-                sub_exp_block_bcast_cols_inplace<cb_qk_im, Sq_chunk_t, scale_fp32, true, false, vector_mode>(
-                    cb_cur_max, cb_cur_sum, Sk_chunk_t_dynamic);
-                cb_wait_front(cb_qk_im, qk_chunk_tiles_dynamic);
+            /**
+             * OPTIMIZATION
+             * reduce_c can perform both reduce_max and eltwise max with previous result.
+             * if do_eltwise_max:
+             *  cur_max = eltwise_max(prev_max, max(qk, dim=-1))
+             * else:
+             *  cur_max = max(qk, dim=-1)
+             */
+            reduce_c<PoolType::MAX, ReduceDim::REDUCE_ROW, cb_qk_im, cb_identity_scale_in, Sq_chunk_t, vector_mode>(
+                cb_cur_max, cb_prev_max, Sk_chunk_t_dynamic, k_chunk > k_chunk_start);
+            /* QK -= cb_cur_max */
+            /* QK = exp(QK)*/
+            reconfig_data_format(cb_qk_im, cb_cur_max);
+            pack_reconfig_data_format(cb_qk_im);
 
+            /**
+             * sub_exp performs `QK = exp((QK - cur_max) * scale)`
+             */
+            sub_exp_block_bcast_cols_inplace<cb_qk_im, Sq_chunk_t, scale_fp32, true, false, vector_mode>(
+                cb_cur_max, cb_cur_sum, Sk_chunk_t_dynamic);
+            cb_wait_front(cb_qk_im, qk_chunk_tiles_dynamic);
+
+            // Reconfig register DF
+            reconfig_data_format(cb_qk_im, cb_identity_scale_in);
+            pack_reconfig_data_format(cb_cur_sum);
+
+            /* reduce_c performs CUR_SUM = sum(QK, dim = -1) */
+            reduce_c<PoolType::SUM, ReduceDim::REDUCE_ROW, cb_qk_im, cb_identity_scale_in, Sq_chunk_t, vector_mode>(
+                cb_cur_sum, cb_cur_sum, Sk_chunk_t_dynamic, false);
+
+            /* OUT_IM = QK @ V_CHUNK */
+            reconfig_data_format(cb_v_in, cb_qk_im);  // DEBUG
+            pack_reconfig_data_format(cb_out_im);
+            matmul_blocks(
+                cb_qk_im,
+                cb_v_in,
+                cb_out_mm,
+                Sq_chunk_t,
+                vDHt,
+                Sk_chunk_t_dynamic,
+                out_num_blocks_dynamic,
+                out_in0_num_subblocks,
+                out_in1_num_subblocks,
+                out_in0_block_w_dynamic,
+                out_subblock_h,
+                out_subblock_w,
+                false /*transpose*/,
+                false,
+                cb_mask_in,
+                cb_zero_in);
+
+            // Reconfig register DF
+            reconfig_data_format_srca(cb_out_im);
+            cb_pop_front(cb_qk_im, qk_chunk_tiles_dynamic);
+
+            /* OUT_ACC += OUT_IM */
+            if (k_chunk == k_chunk_start) {
+                cb_out_mm = cb_out_im;
+            } else {
+                // When there is more than 1 chunk, we perform Lazy Softmax
                 // Reconfig register DF
-                reconfig_data_format(cb_qk_im, cb_identity_scale_in);
+                reconfig_data_format(cb_prev_max, cb_cur_max);
+                pack_reconfig_data_format(cb_exp_max_diff);
+
+                /* EXP_MAX_DIFF = exp(PREV_MAX - CUR_MAX) */
+                sub_exp_block<scale_fp32>(cb_prev_max, cb_cur_max, cb_exp_max_diff, Sq_chunk_t);
+                cb_pop_front(cb_prev_max, Sq_chunk_t);
+
+                /* PREV_SUM *= EXP_MAX_DIFF */
+                mul_block_inplace(cb_prev_sum, cb_exp_max_diff, Sq_chunk_t);
+
+                /* OUT_ACC *= EXP_MAX_DIFF */
+                reconfig_data_format(cb_out_accumulate_im, cb_exp_max_diff);
+                pack_reconfig_data_format(cb_out_accumulate_im);
+                mul_block_bcast_cols<Sq_chunk_t, vDHt, true, false>(
+                    cb_out_accumulate_im, cb_exp_max_diff, cb_out_accumulate_im);
+
+                /* CUR_SUM += PREV_SUM */
+                reconfig_data_format(cb_cur_sum, cb_prev_sum);
                 pack_reconfig_data_format(cb_cur_sum);
-
-                /* reduce_c performs CUR_SUM = sum(QK, dim = -1) */
-                reduce_c<PoolType::SUM, ReduceDim::REDUCE_ROW, cb_qk_im, cb_identity_scale_in, Sq_chunk_t, vector_mode>(
-                    cb_cur_sum, cb_cur_sum, Sk_chunk_t_dynamic, false);
-
-                /* OUT_IM = QK @ V_CHUNK */
-                reconfig_data_format(cb_v_in, cb_qk_im);  // DEBUG
-                pack_reconfig_data_format(cb_out_im);
-                matmul_blocks(
-                    cb_qk_im,
-                    cb_v_in,
-                    cb_out_mm,
-                    Sq_chunk_t,
-                    vDHt,
-                    Sk_chunk_t_dynamic,
-                    out_num_blocks_dynamic,
-                    out_in0_num_subblocks,
-                    out_in1_num_subblocks,
-                    out_in0_block_w_dynamic,
-                    out_subblock_h,
-                    out_subblock_w,
-                    false /*transpose*/,
-                    false,
-                    cb_mask_in,
-                    cb_zero_in);
-
-                // Reconfig register DF
-                reconfig_data_format_srca(cb_out_im);
-                cb_pop_front(cb_qk_im, qk_chunk_tiles_dynamic);
+                add_block_inplace<true>(cb_cur_sum, cb_prev_sum, Sq_chunk_t);
 
                 /* OUT_ACC += OUT_IM */
-                if (k_chunk == k_chunk_start) {
-                    cb_out_mm = cb_out_im;
-                } else {
-                    // When there is more than 1 chunk, we perform Lazy Softmax
-                    // Reconfig register DF
-                    reconfig_data_format(cb_prev_max, cb_cur_max);
-                    pack_reconfig_data_format(cb_exp_max_diff);
+                reconfig_data_format(cb_out_accumulate_im, cb_out_im);
+                pack_reconfig_data_format(cb_out_accumulate_im);
+                add_block_inplace<true>(cb_out_accumulate_im, cb_out_im, out_chunk_tiles);
+            }
 
-                    /* EXP_MAX_DIFF = exp(PREV_MAX - CUR_MAX) */
-                    sub_exp_block<scale_fp32>(cb_prev_max, cb_cur_max, cb_exp_max_diff, Sq_chunk_t);
-                    cb_pop_front(cb_prev_max, Sq_chunk_t);
+            // More local chunks to process - move intermediate sum and max values to ping-pong buffers
+            reconfig_data_format(cb_cur_max, cb_cur_max);
+            pack_reconfig_data_format(cb_prev_max);
 
-                    /* PREV_SUM *= EXP_MAX_DIFF */
-                    mul_block_inplace(cb_prev_sum, cb_exp_max_diff, Sq_chunk_t);
+            // PREV_MAX <- CUR_MAX
+            move_block<true>(cb_cur_max, cb_prev_max, Sq_chunk_t);
 
-                    /* OUT_ACC *= EXP_MAX_DIFF */
-                    reconfig_data_format(cb_out_accumulate_im, cb_exp_max_diff);
-                    pack_reconfig_data_format(cb_out_accumulate_im);
-                    mul_block_bcast_cols<Sq_chunk_t, vDHt, true, false>(
-                        cb_out_accumulate_im, cb_exp_max_diff, cb_out_accumulate_im);
-
-                    /* CUR_SUM += PREV_SUM */
-                    reconfig_data_format(cb_cur_sum, cb_prev_sum);
-                    pack_reconfig_data_format(cb_cur_sum);
-                    add_block_inplace<true>(cb_cur_sum, cb_prev_sum, Sq_chunk_t);
-
-                    /* OUT_ACC += OUT_IM */
-                    reconfig_data_format(cb_out_accumulate_im, cb_out_im);
-                    pack_reconfig_data_format(cb_out_accumulate_im);
-                    add_block_inplace<true>(cb_out_accumulate_im, cb_out_im, out_chunk_tiles);
-                }
-
-                // More local chunks to process - move intermediate sum and max values to ping-pong buffers
-                reconfig_data_format(cb_cur_max, cb_cur_max);
-                pack_reconfig_data_format(cb_prev_max);
-
-                // PREV_MAX <- CUR_MAX
-                move_block<true>(cb_cur_max, cb_prev_max, Sq_chunk_t);
-
-                // PREV_SUM <- CUR_SUM
-                move_block<true>(cb_cur_sum, cb_prev_sum, Sq_chunk_t);
+            // PREV_SUM <- CUR_SUM
+            move_block<true>(cb_cur_sum, cb_prev_sum, Sq_chunk_t);
         }
 
         /* END OF FLASH ATTENTION LOOP */

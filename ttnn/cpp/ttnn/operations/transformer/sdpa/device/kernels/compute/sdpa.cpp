@@ -90,7 +90,8 @@ void kernel_main() {
     constexpr uint32_t cb_sum_B = get_compile_time_arg_val(cb_arg_offset + 16);
     constexpr uint32_t cb_exp_max_diff = get_compile_time_arg_val(cb_arg_offset + 17);
     uint32_t chunked_q_chunk_offset = 0;
-    mm_init(cb_q_in, cb_k_in, cb_out);
+    compute_kernel_hw_startup<SrcOrder::Reverse>(cb_q_in, cb_k_in, cb_out);
+    matmul_init(cb_q_in, cb_k_in);
 
     if constexpr (is_chunked) {
         if (use_chunk_start_idx_tensor != 0) {

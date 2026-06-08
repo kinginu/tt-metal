@@ -106,7 +106,8 @@ void kernel_main() {
 
     constexpr uint32_t num_q_chunks = local_padded_Nt / Sq_chunk_t + Lt / Sq_chunk_t;
 
-    mm_init(cb_q_in, cb_k_in, cb_qk_im);
+    compute_kernel_hw_startup<SrcOrder::Reverse>(cb_q_in, cb_k_in, cb_qk_im);
+    matmul_init(cb_q_in, cb_k_in);
 
     // Wait once for identity scale; streaming v2 removes per-call waits inside reduce_c_row_group.
     cb_wait_front(cb_identity_scale_in, 1);
