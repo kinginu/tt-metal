@@ -387,8 +387,8 @@ void kernel_main() {
         for (uint32_t cur_pass = 0; cur_pass < num_cb_passes; cur_pass++) {
             bool do_mask = mask_padded_data && (cur_pass == num_cb_passes - 1);
 #if FUSED_SCALE_MASK
-            apply_fused_scale_mask(cb_in0, cb_fused_scale, cb_scale_mask, cb_length_t, blk);
-            apply_fused_attn_mask(cb_scale_mask, cb_fused_attn, cb_x, cb_length_t, blk, do_mask);
+            apply_fused_scale_mask(cb_in0, cb_fused_scale, cb_scale_mask, cur_cb_length_t, blk);
+            apply_fused_attn_mask(cb_scale_mask, cb_fused_attn, cb_x, cur_cb_length_t, blk, do_mask);
             cb_processed_input = cb_x;
 #else
             if (do_mask && cur_pass == num_cb_passes - 1) {
@@ -426,8 +426,8 @@ void kernel_main() {
         for (uint32_t cur_pass = 0; cur_pass < num_cb_passes; cur_pass++) {
             bool do_mask = mask_padded_data && (cur_pass == num_cb_passes - 1);
 #if FUSED_SCALE_MASK
-            apply_fused_scale_mask(cb_in0, cb_fused_scale, cb_scale_mask, cb_length_t, blk);
-            apply_fused_attn_mask(cb_scale_mask, cb_fused_attn, cb_x, cb_length_t, blk, do_mask);
+            apply_fused_scale_mask(cb_in0, cb_fused_scale, cb_scale_mask, cur_cb_length_t, blk);
+            apply_fused_attn_mask(cb_scale_mask, cb_fused_attn, cb_x, cur_cb_length_t, blk, do_mask);
             cb_processed_input = cb_x;
 #else
             // Following code is focuesed on padding the last tile that need -inf for sections of the tile that are not
@@ -495,8 +495,8 @@ void kernel_main() {
         for (uint32_t cur_pass = 0; cur_pass < num_cb_passes; cur_pass++) {
             bool do_mask = mask_padded_data && (cur_pass == num_cb_passes - 1);
 #if FUSED_SCALE_MASK
-            apply_fused_scale_mask(cb_in0, cb_fused_scale, cb_scale_mask, cb_length_t, blk);
-            apply_fused_attn_mask(cb_scale_mask, cb_fused_attn, cb_x, cb_length_t, blk, do_mask);
+            apply_fused_scale_mask(cb_in0, cb_fused_scale, cb_scale_mask, cur_cb_length_t, blk);
+            apply_fused_attn_mask(cb_scale_mask, cb_fused_attn, cb_x, cur_cb_length_t, blk, do_mask);
             cb_processed_input = cb_x;
 #else
             if (do_mask && cur_pass == num_cb_passes - 1) {
