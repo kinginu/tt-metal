@@ -20,7 +20,6 @@ import time
 import pytest
 import torch
 from loguru import logger
-import json
 
 import ttnn
 from models.demos.gemma4.tests.test_factory import PREFILL_BUCKETS, parametrize_mesh_with_fabric
