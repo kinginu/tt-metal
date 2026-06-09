@@ -7,6 +7,9 @@
 #include "kernel_utils.hpp"
 #include "api/numeric/bfloat16.h"
 #include "../metadata/metadata.hpp"
+#ifdef TRISC_MATH
+#include "ckernel_sfpu_sampling.h"
+#endif
 
 #if defined(COMPILE_FOR_TRISC)
 #ifndef REDUCE_OP
@@ -132,124 +135,58 @@ FORCE_INLINE void generate_row0_bcast(const uint32_t cb_id, uint16_t bf16_val) {
 #if defined(TRISC_MATH)
 #include "../kernel_includes/tt_metal/hw/ckernels/blackhole/metal/llk_api/llk_math_top32_rm_api.h"
 #include "../kernel_includes/tt_metal/hw/ckernels/blackhole/metal/llk_api/llk_sfpu/llk_math_deepseek_top32_rm.h"
-// Sampling-local single-scalar `recip_tile`
-template <bool legacy_compat = true>
-void calculate_sampling_recip_scalar() {
-    sfpi::vFloat in = sfpi::dst_reg[0];
-    if constexpr (legacy_compat) {
-        sfpi::vFloat out = ckernel::sfpu::_reciprocal_compat_<APPROX ? 2 : 3>(in);
-        if constexpr (DST_ACCUM_MODE || APPROX) {
-            sfpi::dst_reg[0] = out;
-        } else {
-            sfpi::dst_reg[0] = sfpi::reinterpret<sfpi::vFloat>(sfpi::float_to_fp16b(out, sfpi::RoundMode::NearestEven));
-        }
-    } else {
-        if constexpr (APPROX) {
-            sfpi::dst_reg[0] = ckernel::sfpu::_sfpu_reciprocal_<0>(in);
-        } else {
-            if constexpr (DST_ACCUM_MODE) {
-                sfpi::dst_reg[0] = ckernel::sfpu::_sfpu_reciprocal_<2>(in);
-            } else {
-                sfpi::vFloat out = ckernel::sfpu::_sfpu_reciprocal_<1>(in);
-                sfpi::dst_reg[0] =
-                    sfpi::reinterpret<sfpi::vFloat>(sfpi::float_to_fp16b(out, sfpi::RoundMode::NearestEven));
-            }
-        }
-    }
-}
-
 template <bool legacy_compat = true>
 ALWI void sampling_recip_tile_scalar(uint32_t idst) {
-    _llk_math_eltwise_unary_sfpu_params_(calculate_sampling_recip_scalar<legacy_compat>, idst, VectorMode::None);
-}
-
-inline void calculate_sampling_clamp_max_scalar(uint32_t param) {
-    const sfpi::vFloat max_val = ckernel::sfpu::Converter::as_float(param);
-    sfpi::vFloat in = sfpi::dst_reg[0];
-    v_if(in > max_val) { sfpi::dst_reg[0] = max_val; }
-    v_endif;
+    SFPU_CALL_MODE(DST_SYNC_MODE, DST_ACCUM_MODE, calculate_sampling_recip_scalar, (legacy_compat), None, idst);
 }
 
 ALWI void sampling_clamp_max_tile_scalar(uint32_t idst, uint32_t param) {
-    _llk_math_eltwise_unary_sfpu_params_(calculate_sampling_clamp_max_scalar, idst, VectorMode::None, param);
-}
-
-template <SfpuType OP>
-inline void calculate_sampling_binary_comp_first_column(
-    const uint dst_index_in0, const uint dst_index_in1, const uint dst_index_out) {
-    static_assert(
-        OP == SfpuType::le || OP == SfpuType::lt || OP == SfpuType::ge,
-        "sampling_binary_comp_first_column supports le/lt/ge only");
-    constexpr uint dst_tile_size_sfpi = 32;
-    constexpr int ITERATIONS_FIRST_COLUMN = 4;
-
-    for (int d = 0; d < ITERATIONS_FIRST_COLUMN; d++) {
-        sfpi::vFloat in0 = sfpi::dst_reg[dst_index_in0 * dst_tile_size_sfpi];
-        sfpi::vFloat in1 = sfpi::dst_reg[dst_index_in1 * dst_tile_size_sfpi];
-        sfpi::vFloat result = sfpi::vConst0;
-
-        if constexpr (OP == SfpuType::le) {
-            v_if(in0 <= in1) { result = sfpi::vConst1; }
-            v_endif;
-        } else if constexpr (OP == SfpuType::lt) {
-            v_if(in0 < in1) { result = sfpi::vConst1; }
-            v_endif;
-        } else {
-            v_if(in0 >= in1) { result = sfpi::vConst1; }
-            v_endif;
-        }
-
-        sfpi::dst_reg[dst_index_out * dst_tile_size_sfpi] = result;
-        sfpi::dst_reg += 2;
-    }
+    SFPU_CALL_MODE(DST_SYNC_MODE, DST_ACCUM_MODE, calculate_sampling_clamp_max_scalar, (), None, idst, param);
 }
 
 ALWI void sampling_le_binary_tile_first_column(uint32_t idst0, uint32_t idst1, uint32_t odst) {
-    _llk_math_eltwise_binary_sfpu_params_(
-        calculate_sampling_binary_comp_first_column<SfpuType::le>, idst0, idst1, odst, VectorMode::C);
+    SFPU_BINARY_CALL_MODE(
+        DST_SYNC_MODE,
+        DST_ACCUM_MODE,
+        calculate_sampling_binary_comp_first_column,
+        (SfpuType::le),
+        C,
+        idst0,
+        idst1,
+        odst);
 }
 
 ALWI void sampling_lt_binary_tile_first_column(uint32_t idst0, uint32_t idst1, uint32_t odst) {
-    _llk_math_eltwise_binary_sfpu_params_(
-        calculate_sampling_binary_comp_first_column<SfpuType::lt>, idst0, idst1, odst, VectorMode::C);
+    SFPU_BINARY_CALL_MODE(
+        DST_SYNC_MODE,
+        DST_ACCUM_MODE,
+        calculate_sampling_binary_comp_first_column,
+        (SfpuType::lt),
+        C,
+        idst0,
+        idst1,
+        odst);
 }
 
 ALWI void sampling_ge_binary_tile_first_column(uint32_t idst0, uint32_t idst1, uint32_t odst) {
-    _llk_math_eltwise_binary_sfpu_params_(
-        calculate_sampling_binary_comp_first_column<SfpuType::ge>, idst0, idst1, odst, VectorMode::C);
-}
-
-inline void calculate_sampling_mul_unary_scalar_first_column(uint32_t param) {
-    const sfpi::vFloat parameter = ckernel::sfpu::Converter::as_float(param);
-    constexpr int ITERATIONS_FIRST_COLUMN = 4;
-
-    for (int d = 0; d < ITERATIONS_FIRST_COLUMN; d++) {
-        sfpi::vFloat val = sfpi::dst_reg[0];
-        sfpi::dst_reg[0] = val * parameter;
-        sfpi::dst_reg += 2;
-    }
+    SFPU_BINARY_CALL_MODE(
+        DST_SYNC_MODE,
+        DST_ACCUM_MODE,
+        calculate_sampling_binary_comp_first_column,
+        (SfpuType::ge),
+        C,
+        idst0,
+        idst1,
+        odst);
 }
 
 ALWI void sampling_mul_unary_tile_first_column(uint32_t idst, uint32_t param) {
-    _llk_math_eltwise_unary_sfpu_params_(calculate_sampling_mul_unary_scalar_first_column, idst, VectorMode::C, param);
-}
-
-inline void calculate_sampling_add_binary_first_column(
-    const uint dst_index_in0, const uint dst_index_in1, const uint dst_index_out) {
-    constexpr uint dst_tile_size_sfpi = 32;
-    constexpr int ITERATIONS_FIRST_COLUMN = 4;
-
-    for (int d = 0; d < ITERATIONS_FIRST_COLUMN; d++) {
-        sfpi::vFloat in0 = sfpi::dst_reg[dst_index_in0 * dst_tile_size_sfpi];
-        sfpi::vFloat in1 = sfpi::dst_reg[dst_index_in1 * dst_tile_size_sfpi];
-        sfpi::dst_reg[dst_index_out * dst_tile_size_sfpi] = in0 + in1;
-        sfpi::dst_reg += 2;
-    }
+    SFPU_CALL_MODE(DST_SYNC_MODE, DST_ACCUM_MODE, calculate_sampling_mul_unary_scalar_first_column, (), C, idst, param);
 }
 
 ALWI void sampling_add_binary_tile_first_column(uint32_t idst0, uint32_t idst1, uint32_t odst) {
-    _llk_math_eltwise_binary_sfpu_params_(
-        calculate_sampling_add_binary_first_column, idst0, idst1, odst, VectorMode::C);
+    SFPU_BINARY_CALL_MODE(
+        DST_SYNC_MODE, DST_ACCUM_MODE, calculate_sampling_add_binary_first_column, (), C, idst0, idst1, odst);
 }
 #endif
 

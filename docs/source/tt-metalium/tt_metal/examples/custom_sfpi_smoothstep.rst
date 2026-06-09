@@ -136,7 +136,7 @@ The overall flow follows the standard pattern for unary compute kernels:
 
 .. code-block:: cpp
 
-    // tt_metal/programming_examples/custom_sfpi_smoothstep/kernels/compute/tiles_smoothstep.cpp
+    // tt_metal/hw/ckernels/{blackhole,wormhole_b0}/metal/llk_api/llk_sfpu/ckernel_sfpu_smoothstep.h
     void kernel_main() {
         uint32_t n_tiles = get_arg_val<uint32_t>(0);
 
@@ -195,7 +195,9 @@ The ``my_smoothstep_tiles`` function uses the layered abstraction pattern shown 
     // High-level API function
     // Accepts `edge0`, `edge1` and `inv_delta` as parameters
     inline void my_smoothstep_tile(uint32_t idx_dst0, float edge0, float edge1, float inv_delta) {
-        MATH(_llk_math_eltwise_unary_sfpu_params_(
+        MATH(SFPU_CALL_FN(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
             smoothstep_tile_face,
             idx_dst0,
             VectorMode::RC, // Apply on all 4 faces of the tile
@@ -207,7 +209,7 @@ The ``my_smoothstep_tiles`` function uses the layered abstraction pattern shown 
 Parameter Passing
 ~~~~~~~~~~~~~~~~~
 
-The `smoothstep` function needs two scalar parameters: ``edge0`` and ``edge1``. These are passed to the SFPI kernel using the ``_llk_math_eltwise_unary_sfpu_params_`` helper function.
+The `smoothstep` function needs two scalar parameters: ``edge0`` and ``edge1``. These are passed to the SFPI kernel through the ``SFPU_CALL_FN`` macro wrapper.
 
 .. code-block:: cpp
 
@@ -217,7 +219,7 @@ The `smoothstep` function needs two scalar parameters: ``edge0`` and ``edge1``. 
     // Use the parameters for all elements in the tile face
     my_smoothstep_tile_face(float edge0, float edge1, float inv_delta);
 
-The helper function is a template that takes the low-level face function as its first argument, followed by the destination register index, vector mode, and any scalar parameters required by the face function. This approach makes it easy to pass constants or runtime values into the SFPI kernel.
+The macro wrapper takes the low-level face function, followed by the destination register index, vector mode, and any scalar parameters required by the face function. This approach makes it easy to pass constants or runtime values into the SFPI kernel.
 
 Vector Predicates
 ~~~~~~~~~~~~~~~~~
@@ -291,6 +293,6 @@ Conclusion
 
 This example demonstrates the implementation of a custom SFPI kernel with parameter passing and conditional logic. Key takeaways are:
 
-*   **Parameter Passing:** The ``_llk_math_eltwise_*_sfpu_params_`` family of functions is used to pass scalar arguments to a custom SFPI kernel.
+*   **Parameter Passing:** The ``SFPU_CALL_FN`` macro wrapper is used to pass scalar arguments to a custom SFPI kernel.
 *   **Vector Predicates:** The ``v_if``, ``v_elseif``, and ``v_endif`` instructions provide a mechanism for element-wise conditional logic within an SFPI kernel.
 *   **Unary Operations:** Unary SFPI kernels can be implemented efficiently by performing the computation in-place in the destination registers.
