@@ -134,7 +134,7 @@ FORCE_INLINE void generate_row0_bcast(const uint32_t cb_id, uint16_t bf16_val) {
 #endif
 #if defined(TRISC_MATH)
 #include "../kernel_includes/tt_metal/hw/ckernels/blackhole/metal/llk_api/llk_math_top32_rm_api.h"
-#include "../kernel_includes/tt_metal/hw/ckernels/blackhole/metal/llk_api/llk_sfpu/llk_math_deepseek_top32_rm.h"
+#include "../kernel_includes/tt_llk/tt_llk_blackhole/common/inc/sfpu/ckernel_sfpu_deepseek_top32_rm.h"
 template <bool legacy_compat = true>
 ALWI void sampling_recip_tile_scalar(uint32_t idst) {
     SFPU_CALL_MODE(DST_SYNC_MODE, DST_ACCUM_MODE, calculate_sampling_recip_scalar, (legacy_compat), None, idst);
@@ -551,14 +551,44 @@ void run_top32_llk(uint32_t row_elements, uint32_t num_input_tiles, uint32_t pha
     MATH((llk_math_top32_rm_init(in_indices_cb)));
     MATH((llk_math_top32_rm(in_indices_cb, index_offset_tiles, num_faces)));
 
-    MATH((llk_math_deepseek_top32_rm_init<false>()));
+    MATH((llk_math_eltwise_unary_sfpu_init<SfpuType::unused>(sfpu::_top32_rm_init_)));
     if constexpr (presorted) {
-        MATH((llk_math_deepseek_top32_rm_rebuild<false, DST_ACCUM_MODE>(value_offset_tiles, decreasing, false)));
+        MATH(SFPU_CALL(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
+            _bitonic_top32_rebuild_,
+            (false, DST_ACCUM_MODE),
+            value_offset_tiles,
+            VectorMode::RC_custom,
+            decreasing,
+            false /*skip_second*/));
     } else {
-        MATH((llk_math_deepseek_top32_rm_local_sort<false, DST_ACCUM_MODE>(value_offset_tiles, decreasing)));
+        MATH(SFPU_CALL(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
+            _bitonic_top32_phases_steps_,
+            (false, DST_ACCUM_MODE),
+            value_offset_tiles,
+            VectorMode::RC_custom,
+            decreasing));
     }
-    MATH((llk_math_deepseek_top32_rm_merge<false, DST_ACCUM_MODE>(value_offset_tiles, false)));
-    MATH((llk_math_deepseek_top32_rm_rebuild<false, DST_ACCUM_MODE>(value_offset_tiles, decreasing, true)));
+    MATH(SFPU_CALL(
+        DST_SYNC_MODE,
+        DST_ACCUM_MODE,
+        _bitonic_top32_merge_,
+        (false, DST_ACCUM_MODE, false /*idir*/),
+        value_offset_tiles,
+        VectorMode::RC_custom,
+        false /*across_tiles*/));
+    MATH(SFPU_CALL(
+        DST_SYNC_MODE,
+        DST_ACCUM_MODE,
+        _bitonic_top32_rebuild_,
+        (false, DST_ACCUM_MODE),
+        value_offset_tiles,
+        VectorMode::RC_custom,
+        decreasing,
+        true /*skip_second*/));
 
     for (uint32_t i = 64; i < row_elements; i += 64) {
         if (i + 64 > row_elements) {
@@ -580,16 +610,60 @@ void run_top32_llk(uint32_t row_elements, uint32_t num_input_tiles, uint32_t pha
         MATH((llk_math_top32_rm(in_indices_cb, index_offset_tiles + 1, num_faces)));
 
         if constexpr (presorted) {
-            MATH(
-                (llk_math_deepseek_top32_rm_rebuild<false, DST_ACCUM_MODE>(value_offset_tiles + 1, decreasing, false)));
+            MATH(SFPU_CALL(
+                DST_SYNC_MODE,
+                DST_ACCUM_MODE,
+                _bitonic_top32_rebuild_,
+                (false, DST_ACCUM_MODE),
+                value_offset_tiles + 1,
+                VectorMode::RC_custom,
+                decreasing,
+                false /*skip_second*/));
         } else {
-            MATH((llk_math_deepseek_top32_rm_local_sort<false, DST_ACCUM_MODE>(value_offset_tiles + 1, decreasing)));
+            MATH(SFPU_CALL(
+                DST_SYNC_MODE,
+                DST_ACCUM_MODE,
+                _bitonic_top32_phases_steps_,
+                (false, DST_ACCUM_MODE),
+                value_offset_tiles + 1,
+                VectorMode::RC_custom,
+                decreasing));
         }
-        MATH((llk_math_deepseek_top32_rm_merge<false, DST_ACCUM_MODE>(value_offset_tiles + 1, false)));
-        MATH((llk_math_deepseek_top32_rm_rebuild<false, DST_ACCUM_MODE>(value_offset_tiles + 1, increasing, true)));
+        MATH(SFPU_CALL(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
+            _bitonic_top32_merge_,
+            (false, DST_ACCUM_MODE, false /*idir*/),
+            value_offset_tiles + 1,
+            VectorMode::RC_custom,
+            false /*across_tiles*/));
+        MATH(SFPU_CALL(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
+            _bitonic_top32_rebuild_,
+            (false, DST_ACCUM_MODE),
+            value_offset_tiles + 1,
+            VectorMode::RC_custom,
+            increasing,
+            true /*skip_second*/));
 
-        MATH((llk_math_deepseek_top32_rm_merge<false, DST_ACCUM_MODE>(value_offset_tiles, true)));
-        MATH((llk_math_deepseek_top32_rm_rebuild<false, DST_ACCUM_MODE>(value_offset_tiles, decreasing, true)));
+        MATH(SFPU_CALL(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
+            _bitonic_top32_merge_,
+            (false, DST_ACCUM_MODE, false /*idir*/),
+            value_offset_tiles,
+            VectorMode::RC_custom,
+            true /*across_tiles*/));
+        MATH(SFPU_CALL(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
+            _bitonic_top32_rebuild_,
+            (false, DST_ACCUM_MODE),
+            value_offset_tiles,
+            VectorMode::RC_custom,
+            decreasing,
+            true /*skip_second*/));
     }
 
     PACK(TTI_SETADCXX(p_setadc::PAC, 1 - 1, 0x0));
@@ -648,8 +722,15 @@ void run_top32_llk_presorted_1024_opt(uint32_t row_elements, uint32_t num_input_
     transpose_wh_tile(in_indices_cb, 0, index_offset_tiles);
 
     // Step 2: prepare first chunk for pre-sorted combine pipeline.
-    MATH((llk_math_deepseek_top32_rm_init<false>()));
-    MATH((llk_math_deepseek_top32_of_1024_rm_pre_sorted_prep<false, DST_ACCUM_MODE, decreasing>(value_offset_tiles)));
+    MATH((llk_math_eltwise_unary_sfpu_init<SfpuType::unused>(sfpu::_top32_rm_init_)));
+    MATH(SFPU_CALL(
+        DST_SYNC_MODE,
+        DST_ACCUM_MODE,
+        _bitonic_top32_of_1024_rm_pre_sorted_prep_,
+        (false, DST_ACCUM_MODE, decreasing),
+        value_offset_tiles,
+        VectorMode::RC_custom,
+        value_offset_tiles));
 
     // Steps 3-5: ingest remaining full 1024 chunks and combine.
     for (uint32_t i = 1; i < num_chunks; ++i) {
@@ -661,13 +742,33 @@ void run_top32_llk_presorted_1024_opt(uint32_t row_elements, uint32_t num_input_
         transpose_wh_init_short(in_indices_cb);
         transpose_wh_tile(in_indices_cb, i, index_offset_tiles + 1);
 
-        MATH((llk_math_deepseek_top32_of_1024_rm_pre_sorted_prep<false, DST_ACCUM_MODE, increasing>(
-            value_offset_tiles + 1)));
-        MATH((llk_math_deepseek_top32_of_1024_rm_pre_sorted_combine<false, DST_ACCUM_MODE>((value_offset_tiles))));
+        MATH(SFPU_CALL(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
+            _bitonic_top32_of_1024_rm_pre_sorted_prep_,
+            (false, DST_ACCUM_MODE, increasing),
+            value_offset_tiles + 1,
+            VectorMode::RC_custom,
+            value_offset_tiles + 1));
+        MATH(SFPU_CALL(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
+            _bitonic_top32_of_1024_rm_pre_sorted_combine_,
+            (false, DST_ACCUM_MODE),
+            value_offset_tiles,
+            VectorMode::RC_custom,
+            value_offset_tiles));
     }
 
     // Step 6: collapse per-face top-32 to a single top-32.
-    MATH((llk_math_deepseek_top32_of_1024_rm_pre_sorted_final<false, DST_ACCUM_MODE>(value_offset_tiles)));
+    MATH(SFPU_CALL(
+        DST_SYNC_MODE,
+        DST_ACCUM_MODE,
+        _bitonic_top32_of_1024_rm_pre_sorted_final_,
+        (false, DST_ACCUM_MODE),
+        value_offset_tiles,
+        VectorMode::RC_custom,
+        value_offset_tiles));
 
     // Steps 7-9: handle trailing (<1024) values in 64-element chunks.
     uint32_t num_faces = 4;
@@ -686,12 +787,50 @@ void run_top32_llk_presorted_1024_opt(uint32_t row_elements, uint32_t num_input_
         MATH((llk_math_top32_rm_init(in_indices_cb)));
         MATH((llk_math_top32_rm(in_indices_cb, index_offset_tiles + 1, num_faces)));
 
-        MATH((llk_math_deepseek_top32_rm_rebuild<false, DST_ACCUM_MODE>(value_offset_tiles + 1, decreasing, false)));
-        MATH((llk_math_deepseek_top32_rm_merge<false, DST_ACCUM_MODE>(value_offset_tiles + 1, false)));
-        MATH((llk_math_deepseek_top32_rm_rebuild<false, DST_ACCUM_MODE>(value_offset_tiles + 1, increasing, true)));
+        MATH(SFPU_CALL(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
+            _bitonic_top32_rebuild_,
+            (false, DST_ACCUM_MODE),
+            value_offset_tiles + 1,
+            VectorMode::RC_custom,
+            decreasing,
+            false /*skip_second*/));
+        MATH(SFPU_CALL(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
+            _bitonic_top32_merge_,
+            (false, DST_ACCUM_MODE, false /*idir*/),
+            value_offset_tiles + 1,
+            VectorMode::RC_custom,
+            false /*across_tiles*/));
+        MATH(SFPU_CALL(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
+            _bitonic_top32_rebuild_,
+            (false, DST_ACCUM_MODE),
+            value_offset_tiles + 1,
+            VectorMode::RC_custom,
+            increasing,
+            true /*skip_second*/));
 
-        MATH((llk_math_deepseek_top32_rm_merge<false, DST_ACCUM_MODE>(value_offset_tiles, true)));
-        MATH((llk_math_deepseek_top32_rm_rebuild<false, DST_ACCUM_MODE>(value_offset_tiles, decreasing, true)));
+        MATH(SFPU_CALL(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
+            _bitonic_top32_merge_,
+            (false, DST_ACCUM_MODE, false /*idir*/),
+            value_offset_tiles,
+            VectorMode::RC_custom,
+            true /*across_tiles*/));
+        MATH(SFPU_CALL(
+            DST_SYNC_MODE,
+            DST_ACCUM_MODE,
+            _bitonic_top32_rebuild_,
+            (false, DST_ACCUM_MODE),
+            value_offset_tiles,
+            VectorMode::RC_custom,
+            decreasing,
+            true /*skip_second*/));
     }
 
     // Step 10: pack final top-32 scores/indices.
