@@ -512,7 +512,15 @@ class TtTransformer(LightweightModule):
         rot_current_pos = torch.maximum(
             current_pos, torch.tensor(0, dtype=torch.int64)
         )  # Ensure position indices are non-negative
-        rope_idxs = self.rope_setup.get_rm_rot_idxs(rot_current_pos, on_host=True)
+        # The no-prefetcher (Blackhole) decode uses the NON-fused rotary op, which needs the simple
+        # get_rot_idxs/get_rot_mats tables. get_rm_rot_idxs/get_rm_rot_mats produce the FUSED-qk
+        # expanded layout ([1, expanded_batch, heads, head_dim]); feeding that to the non-fused op
+        # (via the slice branch in forward_decode) yields a wrong rotary at pos>0 (pos0 is rotary-
+        # independent, so it hides the bug) and collapses multi-layer decode PCC.
+        if self.use_prefetcher:
+            rope_idxs = self.rope_setup.get_rm_rot_idxs(rot_current_pos, on_host=True)
+        else:
+            rope_idxs = self.rope_setup.get_rot_idxs(rot_current_pos, on_host=True)
         cur_pos_shard_dim = 0
         if is_cur_pos_sharded:
             cur_pos_shard_dim = 1
@@ -557,7 +565,10 @@ class TtTransformer(LightweightModule):
         Get rope sin/cos
         Embed tokens
         """
-        tt_rot_mats = self.rope_setup.get_rm_rot_mats(rope_idxs)
+        if self.use_prefetcher:
+            tt_rot_mats = self.rope_setup.get_rm_rot_mats(rope_idxs)
+        else:
+            tt_rot_mats = self.rope_setup.get_rot_mats(rope_idxs)
         tt_tokens = self.embd(tokens)
         return tt_tokens, current_pos, tt_rot_mats, page_table
 
@@ -629,7 +640,7 @@ class TtTransformer(LightweightModule):
             tt_logits = self.tt_ccl.line_all_gather(
                 tt_logits[0],
                 dim=3,
-                num_links=3,
+                num_links=self.model_config["GALAXY_NUM_LINKS"],
                 cluster_axis=0,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 buffer_key="SAMPLING",
@@ -745,7 +756,10 @@ class TtTransformer(LightweightModule):
         This method will take device tensors and any other args to run forward.
         It returns ttnn device tensors.
         """
-        rot_mats = self.rope_setup.get_rm_rot_mats(rot_mat_idxs)
+        if self.use_prefetcher:
+            rot_mats = self.rope_setup.get_rm_rot_mats(rot_mat_idxs)
+        else:
+            rot_mats = self.rope_setup.get_rot_mats(rot_mat_idxs)
         x_embd = self.embd(x)
         tt_logits = self.forward(
             x_embd,
@@ -761,7 +775,7 @@ class TtTransformer(LightweightModule):
             tt_logits = self.tt_ccl.line_all_gather(
                 tt_logits[0],
                 dim=3,
-                num_links=3,
+                num_links=self.model_config["GALAXY_NUM_LINKS"],
                 cluster_axis=0,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 buffer_key="SAMPLING",
@@ -795,10 +809,11 @@ class TtTransformer(LightweightModule):
             if self.is_decode_setup is False:
                 self.setup_decode(self.mesh_sub_device_manager_id_decode)
                 self.is_decode_setup = True
-                # prefetch
-                if self.use_prefetcher:
-                    for layer in self.layers:
-                        layer.prefetch(self.prefetcher_setup, self.tt_ccl)
+                # Re-point every submodule at the (new) decode CCL. The prefetcher tensor inserts
+                # inside layer.prefetch are guarded on prefetcher_setup, so this is safe for the
+                # no-prefetcher Blackhole path too (otherwise layers keep the stale prefill CCL).
+                for layer in self.layers:
+                    layer.prefetch(self.prefetcher_setup, self.tt_ccl)
                 self.norm.tt_ccl = self.tt_ccl
                 self.lm_head.tt_ccl = self.tt_ccl
                 if self.use_prefetcher:
@@ -815,9 +830,11 @@ class TtTransformer(LightweightModule):
             if self.is_prefill_setup is False:
                 self.setup_prefill(self.mesh_sub_device_manager_id_prefill)
                 self.is_prefill_setup = True
-                if self.use_prefetcher:
-                    for layer in self.layers:
-                        layer.prefetch(self.prefetcher_setup, self.tt_ccl)
+                # Re-point every submodule at the (new) prefill CCL. Without this the no-prefetcher
+                # Blackhole layers keep the decode CCL and prefill hits the decode all_reduce_async
+                # path (which rejects DRAM input on BH).
+                for layer in self.layers:
+                    layer.prefetch(self.prefetcher_setup, self.tt_ccl)
                 self.norm.tt_ccl = self.tt_ccl
                 self.lm_head.tt_ccl = self.tt_ccl
 

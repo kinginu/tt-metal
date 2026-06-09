@@ -424,7 +424,7 @@ class TtLlamaAttention(LightweightModule):
 
     def prefetch(self, prefetcher_setup, tt_ccl):
         self.prefetcher_setup = prefetcher_setup
-        if tt_ccl.mode == "decode":
+        if tt_ccl.mode == "decode" and self.prefetcher_setup is not None:
             self.prefetcher_setup.insert_tensor(self.wqkv)
             self.prefetcher_setup.insert_tensor(self.wo)
         self.tt_ccl = tt_ccl
@@ -443,32 +443,6 @@ class TtLlamaAttention(LightweightModule):
             padding=[(0, 0), (0, 0), (0, 0), (0, pad_w)],
             value=0.0,
         )
-
-    def _host_sum_columns_decode(self, tensor_mesh):
-        """Sum column-sharded partials within each mesh row; replicate to all columns."""
-        rows, cols = int(self.cluster_shape[0]), int(self.cluster_shape[1])
-        shards = ttnn.get_device_tensors(tensor_mesh)
-        if len(shards) < rows * cols:
-            return tensor_mesh
-        dtype = tensor_mesh.get_dtype()
-        for r in range(rows):
-            acc = None
-            for c in range(cols):
-                part = ttnn.to_torch(shards[r * cols + c]).float()
-                acc = part if acc is None else acc + part
-            acc_bf16 = acc.to(torch.bfloat16)
-            for c in range(cols):
-                shard = shards[r * cols + c]
-                summed_tt = ttnn.from_torch(
-                    acc_bf16,
-                    dtype=dtype,
-                    layout=shard.layout,
-                    memory_config=shard.memory_config(),
-                    device=self.mesh_device,
-                )
-                ttnn.copy(summed_tt, shard)
-                ttnn.deallocate(summed_tt)
-        return tensor_mesh
 
     def _apply_decode_qk_norm(self, q_heads_pre_rot_1BQD, k_heads_pre_rot_1BKD):
         if self.model_config.get("USE_PREFETCHER", False):
@@ -635,7 +609,9 @@ class TtLlamaAttention(LightweightModule):
         else:
             # No-prefetch (Blackhole) per-device QKV: column-sharded activation @ interleaved DRAM
             # wqkv [k_local, qkv_n_local], auto program config + interleaved output (a DRAM-sharded
-            # program config hangs here). Each mesh column holds a partial; sum across columns next.
+            # program config hangs here). Each mesh column holds a K-fractured partial; they are
+            # summed across columns on device (line_all_reduce(cluster_axis=1)) just before head
+            # creation, once the tensor is in the width-sharded L1 create-head layout.
             x_in = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
             xqkv_fused_sharded = ttnn.linear(
                 x_in,
@@ -644,11 +620,11 @@ class TtLlamaAttention(LightweightModule):
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 core_grid=None,
                 compute_kernel_config=self.compute_kernel_config_hifi2,
-                dtype=ttnn.bfloat16,
+                # bf8 so the column all-reduce input matches persistent_buffers[1] (bf8) CB sizing.
+                dtype=ttnn.bfloat8_b,
             )
             if x_in is not x:
                 ttnn.deallocate(x_in)
-            xqkv_fused_sharded = self._host_sum_columns_decode(xqkv_fused_sharded)
         ttnn.deallocate(x)
         # xqkv_fused_sharded -> [1, 1, 32, 12288 // 8]
 
@@ -688,6 +664,20 @@ class TtLlamaAttention(LightweightModule):
                 ttnn.deallocate(xqkv_fused_interleaved)
             else:
                 xqkv_fused_create_head_in = xqkv_fused_interleaved
+            # Sum the K-fractured QKV partials across mesh columns on device (sum + replicate),
+            # the device equivalent of the former host column-sum. This keeps the whole decode path
+            # on device and trace-capturable. The width-sharded [32, head_dim]x(qkv_n_local/head_dim)
+            # L1 layout matches persistent_buffers[1] for the cluster-axis-1 all-reduce.
+            # bf8 input matches the bf8 interim buffer CB sizing; output bf16 because
+            # nlp_create_qkv_heads_decode only accepts bf16/fp32.
+            xqkv_fused_create_head_in = self.tt_ccl.line_all_reduce(
+                xqkv_fused_create_head_in,
+                cluster_axis=1,
+                num_links=self.model_config["GALAXY_NUM_LINKS"],
+                memory_config=xqkv_fused_create_head_in.memory_config(),
+                dtype=ttnn.bfloat16,
+                use_optimal_ccl_for_llama=True,
+            )
             (
                 q_heads_pre_rot_1BQD,
                 k_heads_pre_rot_1BKD,
@@ -995,14 +985,28 @@ class TtLlamaAttention(LightweightModule):
         if seq_len > 2048:
             x_11SH = ttnn.reshape(x_11SH, [1, seq_len // 2048, 2048, -1])
 
-        xqkv = ttnn.linear(
-            x_11SH,
-            self.wqkv_interleaved,
-            dtype=self.ccl_dtype,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            compute_kernel_config=self.compute_kernel_config_hifi2,
-            program_config=self.model_config["XQKV_PREFILL_PROGCFG"](seq_len),
-        )
+        if self.model_config["USE_PREFETCHER"]:
+            xqkv = ttnn.linear(
+                x_11SH,
+                self.wqkv_interleaved,
+                dtype=self.ccl_dtype,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                compute_kernel_config=self.compute_kernel_config_hifi2,
+                program_config=self.model_config["XQKV_PREFILL_PROGCFG"](seq_len),
+            )
+        else:
+            # No-prefetch (Blackhole) per-device QKV: column-fractured activation (K=k_local=1280)
+            # @ interleaved DRAM wqkv [k_local, qkv_n_local]. The padded ring weight expects K=1536;
+            # the unpadded per-device weight matches the activation and keeps N=qkv_n_local so the
+            # downstream line_all_reduce(cluster_axis=1) + nlp_create_qkv_heads stay correct.
+            xqkv = ttnn.linear(
+                x_11SH,
+                self.wqkv_per_device,
+                dtype=self.ccl_dtype,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                compute_kernel_config=self.compute_kernel_config_hifi2,
+                program_config=None,
+            )
         # Minimal matmul is giving bad outputs for seqlen > 128
         # xqkv = ttnn.experimental.minimal_matmul(
         #     input_tensor=x_11SH,
@@ -1017,7 +1021,7 @@ class TtLlamaAttention(LightweightModule):
         xqkv_fused = self.tt_ccl.line_all_reduce(
             xqkv,
             cluster_axis=1,
-            num_links=3,
+            num_links=self.model_config["GALAXY_NUM_LINKS"],
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
             buffer_key="QKV",
             batch_size=batch_size,
@@ -1183,7 +1187,7 @@ class TtLlamaAttention(LightweightModule):
                 attn_output_84SD = self.tt_ccl.line_all_reduce(
                     attn_output_84SD,
                     cluster_axis=1,
-                    num_links=3,
+                    num_links=self.model_config["GALAXY_NUM_LINKS"],
                     memory_config=ttnn.DRAM_MEMORY_CONFIG,
                     buffer_key="ATTN_REPLICATE",
                 )
@@ -1284,7 +1288,7 @@ class TtLlamaAttention(LightweightModule):
         output_11SH_reduced = self.tt_ccl.line_all_reduce(
             output_11SH,
             cluster_axis=0,
-            num_links=3,
+            num_links=self.model_config["GALAXY_NUM_LINKS"],
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
             buffer_key="WO_AG" if seq_len <= 4096 else "WO",
         )

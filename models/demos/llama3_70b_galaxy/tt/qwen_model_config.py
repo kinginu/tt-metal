@@ -450,7 +450,7 @@ class TtQwenModelArgs(TtModelArgs):
                 else min(256, chunk_start_idx & -chunk_start_idx)
                 if seqlen >= 2048
                 else min(64, chunk_start_idx & -chunk_start_idx),
-                k_chunk_size=512
+                k_chunk_size=(256 if self.is_blackhole else 512)
                 if seqlen >= 2048 and chunk_start_idx == 0
                 else 64
                 if seqlen < 2048 and chunk_start_idx == 0

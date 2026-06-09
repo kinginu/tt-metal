@@ -150,7 +150,7 @@ def create_tt_qwen_model(
             "models/demos/llama3_70b_galaxy/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
             True,  # instruct mode
             1,  # repeat_batches
-            128 * 1024,  # max_seq_len
+            2048,  # max_seq_len (cap < 4096 to skip prefill-warmup of the seq>=4096 fused FF2 kernel)
             1,  # batch_size
             128,  # max_generated_tokens
             True,  # paged_attention
@@ -161,7 +161,7 @@ def create_tt_qwen_model(
             False,  # pcc_check
             False,  # prefill-only profile
             64,  # num layers
-            False,  # print_outputs
+            True,  # print_outputs
             False,  # is_cur_pos_sharded
             False,  # is_page_table_sharded
         ),
@@ -389,7 +389,7 @@ def create_tt_qwen_model(
             "num_command_queues": 1,
             "dispatch_core_axis": ttnn.DispatchCoreAxis.COL,
             "worker_l1_size": 1345000,
-            "fabric_config": True,
+            "fabric_config": ttnn.FabricConfig.FABRIC_2D_TORUS_XY,
         }
     ],
     indirect=True,

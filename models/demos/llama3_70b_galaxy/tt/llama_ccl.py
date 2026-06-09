@@ -1025,6 +1025,27 @@ class TT_CCL:
         batch_size=1,
     ):
         if self.mode == "prefill":
+            if self.is_qwen and not self.model_config.get("USE_PREFETCHER", True):
+                # BH no-prefetch: reduce_scatter_minimal_async (the ring prefill path) deadlocks on
+                # the 2D-torus fabric for the column reduction. Use the stable ttnn.reduce_scatter
+                # with the configured Ring topology, mirroring the working decode no-prefetch path.
+                B = input_tensor_mesh.shape[1]
+                input_tensor_mesh = ttnn.reshape(
+                    input_tensor_mesh, (1, 1, B * input_tensor_mesh.shape[-2], input_tensor_mesh.shape[-1])
+                )
+                seqlen = input_tensor_mesh.shape[-2]
+                ttnn_tensor_out = ttnn.reduce_scatter(
+                    input_tensor_mesh,
+                    dim,
+                    cluster_axis=cluster_axis,
+                    memory_config=memory_config,
+                    topology=self.model_config["CCL_TOPOLOGY"],
+                    num_links=num_links,
+                    subdevice_id=self.worker_sub_device_id,
+                )
+                ttnn_tensor_out = ttnn.reshape(ttnn_tensor_out, (1, B, seqlen // B, ttnn_tensor_out.shape[-1]))
+                self.gather_idx[cluster_axis] = (self.gather_idx[cluster_axis] + 1) % self.num_cbs
+                return ttnn_tensor_out
             if self.use_ring_rs_prefill:
                 return self.ring_reduce_scatter(
                     input_tensor_mesh,
@@ -1122,7 +1143,8 @@ class TT_CCL:
             self.persistent_buffers[B * seqlen].get(buffer_key, None) if B * seqlen in self.persistent_buffers else None
         )
         persistent_buffers_list = list(persistent_buffers.values()) if persistent_buffers else None
-        num_links = 4
+        # Cap to the links physically available on the mesh (Blackhole Galaxy exposes 2, not 4).
+        num_links = min(4, self.model_config["GALAXY_NUM_LINKS"])
         # Seeing better performance for longer sequence lengths with num_workers_per_link = 4
         if seqlen > 128:
             num_workers_per_link = 4
@@ -1293,7 +1315,8 @@ class TT_CCL:
         )
         # persistent_buffers = None
 
-        num_links = 4
+        # Cap to the links physically available on the mesh (Blackhole Galaxy exposes 2, not 4).
+        num_links = min(4, self.model_config["GALAXY_NUM_LINKS"])
         if reverse_order:
             all_gather_function = ttnn.experimental.all_gather_async_reversed
         else:
@@ -1350,9 +1373,10 @@ class TT_CCL:
             core_grid = ttnn.CoreCoord(grid_size[0], grid_size[1])
 
         div_axis = core_grid.x if force_transpose else core_grid.y
+        max_links = self.model_config["GALAXY_NUM_LINKS"]
         num_links = 1
         for nl in [4, 3, 2, 1]:
-            if div_axis % nl == 0:
+            if nl <= max_links and div_axis % nl == 0:
                 num_links = nl
                 break
 
@@ -1518,6 +1542,7 @@ def tt_distributed_rmsnorm(
     mesh_device,
     compute_kernel_config,
     tt_ccl=None,
+    output_dtype=None,
 ):
     use_2d_grid = False
 
@@ -1531,7 +1556,8 @@ def tt_distributed_rmsnorm(
     )
     tt_stats.deallocate(True)
 
-    # Run distributed rmsnorm part 2
+    # Run distributed rmsnorm part 2. output_dtype lets the caller keep the norm output bf8 even when
+    # the residual input is bf16 (BH no-prefetch), so downstream matmul activations stay small in L1.
     tt_out = ttnn.rms_norm_post_all_gather(
         inp,
         tt_stats_gathered,
@@ -1539,6 +1565,7 @@ def tt_distributed_rmsnorm(
         weight=gamma,
         compute_kernel_config=compute_kernel_config,
         use_2d_core_grid=use_2d_grid,
+        dtype=output_dtype,
     )
     # tt_stats_gathered.deallocate(True)
     # inp.deallocate(True)

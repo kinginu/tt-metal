@@ -68,6 +68,14 @@ class DistributedNorm(LightweightModule):
 
     def forward(self, x, res, mode):
         """Apply a norm, possibly gathering inputs if required."""
+        # On the BH no-prefetch path the residual stream is bf16 (kept high-precision to avoid bf8
+        # accumulation error over 64 layers). The norm output only feeds matmuls and is not part of
+        # the residual, so force it to bf8 to keep activation/CB footprint small (avoids L1 clashes
+        # at long prefill sequence lengths). Other paths keep their input-derived dtype (None).
+        blackhole_no_prefetcher = (not getattr(self.args, "use_prefetcher", True)) and getattr(
+            self.args, "is_blackhole", False
+        )
+        norm_output_dtype = ttnn.bfloat8_b if blackhole_no_prefetcher else None
         if mode == "decode":
             if not self.use_sharded_decode:
                 # BH no-prefetch decode. The residual stream is column-fractured (dim/4 per
@@ -87,6 +95,7 @@ class DistributedNorm(LightweightModule):
                     mesh_device=self.args.mesh_device,
                     compute_kernel_config=self.ln_cfg,
                     tt_ccl=self.tt_ccl,
+                    output_dtype=norm_output_dtype,
                 )
                 if self.norm.output_mem_config is not None:
                     x = ttnn.to_memory_config(x, self.norm.output_mem_config)
@@ -112,4 +121,5 @@ class DistributedNorm(LightweightModule):
                 mesh_device=self.args.mesh_device,
                 compute_kernel_config=self.ln_cfg,
                 tt_ccl=self.tt_ccl,
+                output_dtype=norm_output_dtype,
             )

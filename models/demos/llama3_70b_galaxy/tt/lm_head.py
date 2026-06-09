@@ -144,7 +144,7 @@ class LMHead(LightweightModule):
 
     def forward(self, x: ttnn.Tensor, worker_sub_device_id, mode):
         outputs = []
-        num_links = 3
+        num_links = self.args.model_config["GALAXY_NUM_LINKS"]
         if mode == "decode" and self.no_prefetcher:
             num_links = self.args.model_config["GALAXY_NUM_LINKS"]
             # Blackhole no-prefetch: per-device matmul on the unpadded column-fractured K

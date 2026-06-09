@@ -246,9 +246,14 @@ class Generator(WarmupForwardMixin):
                 warmup_empty_slots = list(range(batch))
 
                 if not sampling_parameters_sweeped:
+                    # On Blackhole the non-greedy/penalty sampling kernels (scatter_add bincounts)
+                    # are not supported, so only warm up greedy (argmax) sampling.
+                    non_greedy_decoding_on_device = sampling_on_device_enabled and not getattr(
+                        self.model.args, "is_blackhole", False
+                    )
                     sampling_params_list = self._create_sampling_params(
                         can_sample_on_device=sampling_on_device_enabled,
-                        non_greedy_decoding_on_device=sampling_on_device_enabled,
+                        non_greedy_decoding_on_device=non_greedy_decoding_on_device,
                         batch_size=batch,
                     )
                 else:

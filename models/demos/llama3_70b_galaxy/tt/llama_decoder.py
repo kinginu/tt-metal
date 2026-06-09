@@ -150,10 +150,12 @@ class TtTransformerBlock(LightweightModule):
         # h contains 0 in layer 0 and h_prev+x_prev+attn_out_prev thereafter, h is persistent
         skip_mem_cfg = self.model_config["DECODE_RESIDUAL_MEMCFG"] if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG
         # On the BH no-prefetch path the residual stream defaults to bf8, so it is re-quantized on
-        # every layer's residual add. That accumulated bf8 error is masked inside the residual stream
-        # but is exposed (and amplified by gamma) at the final model norm -> LM head. Keep the residual
-        # adds in bf16 there. The 70B prefetcher path is unchanged (res_dtype=None -> op default).
-        res_dtype = ttnn.bfloat16 if (mode == "decode" and self.blackhole_no_prefetcher) else None
+        # every layer's residual add. Over 64 layers that accumulated bf8 error degrades the final
+        # hidden state (prefill body PCC 0.999 @ 3L -> 0.958 @ 64L), which is too low for the LM-head
+        # argmax to pick coherent tokens. Keep the residual adds in bf16 for both prefill and decode
+        # so the running sum is not re-quantized each layer. The 70B prefetcher path is unchanged
+        # (res_dtype=None -> op default).
+        res_dtype = ttnn.bfloat16 if self.blackhole_no_prefetcher else None
         if mode == "decode":
             # In no-prefetcher Blackhole demo runs, layer-0 decode input can remain DRAM/interleaved.
             # Let downstream norm path handle this instead of hard-failing at the boundary check.
@@ -196,7 +198,7 @@ class TtTransformerBlock(LightweightModule):
             batch_size=batch_size,
         )
         if mode == "prefill":
-            h = ttnn.add(x, attn_out, memory_config=skip_mem_cfg)  # bfloat8_b
+            h = ttnn.add(x, attn_out, memory_config=skip_mem_cfg, dtype=res_dtype)  # bf16 on BH no-prefetch
             x.deallocate(True)
             ff_in_sharded, _ = self.ff_norm(h, None, mode)
         if mode == "decode":
