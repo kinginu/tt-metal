@@ -65,7 +65,7 @@ class Gemma4Generator(Generator):
             kv_cache=kv_cache,
             enable_trace=enable_trace,
             can_sample_on_device=can_sample_on_device,
-            greedy_only=not non_greedy_decoding_on_device,
+            non_greedy_decoding_on_device=non_greedy_decoding_on_device,
         )
         if enable_trace:
             # Gemma4 prefill depends on prompt-specific per-layer inputs.
