@@ -412,7 +412,7 @@ def format_sampling_params(sampling_params, max_batch_size):
     top_p = _pad(sampling_params.top_p, "top_p")
     top_k = _pad(sampling_params.top_k, "top_k")
 
-    # enable_log_probs / num_logprobs: scalar → broadcast to all users.
+    # enable_log_probs / num_logprobs / scalar seed: scalar → broadcast to all users.
     # Multi-element list → pad with default (False/0) for inactive slots.
     # Single-element list (from scalar→list conversion) → broadcast to all.
     def _broadcast_pad(lst, name):
@@ -428,7 +428,7 @@ def format_sampling_params(sampling_params, max_batch_size):
     else:
         num_logprobs = None
 
-    # Normalise and pad penalty / seed fields (may still be None/scalar)
+    # Normalise and pad penalty fields (may still be None/scalar)
     def _normalise_and_pad(name):
         value = getattr(sampling_params, name, None)
         if value is None:
@@ -442,7 +442,7 @@ def format_sampling_params(sampling_params, max_batch_size):
     presence_penalty = _normalise_and_pad("presence_penalty")
     frequency_penalty = _normalise_and_pad("frequency_penalty")
     repetition_penalty = _normalise_and_pad("repetition_penalty")
-    seed = _normalise_and_pad("seed")
+    seed = _broadcast_pad(getattr(sampling_params, "seed", None), "seed")
 
     # Clamp / transform values in the new lists (no mutation of the input)
     TOP_P_MIN = 0.0

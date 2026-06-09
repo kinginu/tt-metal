@@ -10,7 +10,7 @@ import torch.nn.functional as F
 import ttnn
 import models.common.sampling.generator as sampling_generator_module
 from models.common.sampling import LogProbsCalculator
-from models.common.sampling.generator import MAX_UINT32, SeedManager
+from models.common.sampling.generator import MAX_UINT32, SamplingParams, SeedManager, format_sampling_params
 from models.common.sampling.tt_log_probs import MAX_TOP_LOGPROBS, LogProbsResult
 from models.common.utility_functions import comp_pcc
 
@@ -68,6 +68,22 @@ def test_seed_manager_never_uploads_zero_for_unseeded_random_init(monkeypatch):
     manager.get_new_values()
 
     assert uploads[-1].tolist() == [MAX_UINT32] * 4
+
+
+def test_format_sampling_params_broadcasts_scalar_seed_zero():
+    params = SamplingParams(temperature=1.0, top_k=32, top_p=0.95, seed=0)
+
+    formatted = format_sampling_params(params, max_batch_size=32)
+
+    assert formatted.seed == [0] * 32
+
+
+def test_format_sampling_params_pads_multi_seed_list_with_none():
+    params = SamplingParams(temperature=[1.0, 1.0], top_k=[32, 32], top_p=[0.95, 0.95], seed=[0, 7])
+
+    formatted = format_sampling_params(params, max_batch_size=32)
+
+    assert formatted.seed[:4] == [0, 7, None, None]
 
 
 # ---------------------------------------------------------------------------
