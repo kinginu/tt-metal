@@ -21,6 +21,7 @@ on:
           - kimi_prefill_block
           - prefill_block_determinism
           - prefill_transformer_determinism
+          - sdpa_perf
         default: 'all'
       platform:
         required: false
@@ -53,6 +54,8 @@ jobs:
 
   build-artifact:
     needs: check-harbor
+    # Skip when only the perf checks were requested — they use the profiler build below.
+    if: ${{ inputs.test-type != 'sdpa_perf' }}
     uses: ./.github/workflows/build-artifact.yaml
     permissions:
       contents: read
@@ -64,8 +67,30 @@ jobs:
       build-wheel: true
       platform: ${{ inputs.platform || 'Ubuntu 22.04' }}
       enable-lto: ${{ inputs.enable-lto || false }}
+
+  # Separate profiler (tracy) build used only by the ring joint SDPA perf checks, which
+  # call run_device_profiler. Keeps the functional prefill jobs on the plain build above.
+  build-artifact-profiler:
+    needs: check-harbor
+    # Only build the profiler artifact when the perf job will actually run.
+    if: ${{ contains(fromJson('["all", "sdpa_perf"]'), inputs.test-type || 'all') }}
+    uses: ./.github/workflows/build-artifact.yaml
+    permissions:
+      contents: read
+      packages: write
+    secrets: inherit
+    with:
+      harbor-prefix: ${{ needs.check-harbor.outputs.harbor-prefix }}
+      build-type: ${{ inputs.build-type || 'Release' }}
+      tracy: true
+      build-wheel: true
+      platform: ${{ inputs.platform || 'Ubuntu 22.04' }}
+      enable-lto: ${{ inputs.enable-lto || false }}
+
   Galaxy-DeepSeek-Prefill-tests:
     needs: [check-harbor, build-artifact]
+    # Skip when only the perf checks were requested (they run on the profiler build below).
+    if: ${{ inputs.test-type != 'sdpa_perf' }}
     secrets: inherit
     uses: ./.github/workflows/galaxy-deepseek-prefill-tests-impl.yaml
     with:
@@ -74,3 +99,19 @@ jobs:
       wheel-artifact-name: ${{ needs.build-artifact.outputs.wheel-artifact-name }}
       enabled-skus: bh_galaxy
       test-type: ${{ inputs.test-type || 'all' }}
+      # Perf checks need the profiler build, so keep them out of the "all" plain-build run.
+      exclude-test-group: sdpa_perf
+
+  Galaxy-DeepSeek-Prefill-SDPA-Perf-tests:
+    needs: [check-harbor, build-artifact-profiler]
+    # Runs for the default "all" and when the sdpa_perf group is explicitly selected.
+    if: ${{ contains(fromJson('["all", "sdpa_perf"]'), inputs.test-type || 'all') }}
+    secrets: inherit
+    uses: ./.github/workflows/galaxy-deepseek-prefill-tests-impl.yaml
+    with:
+      docker-image: ${{ needs.build-artifact-profiler.outputs.dev-docker-image }}
+      build-artifact-name: ${{ needs.build-artifact-profiler.outputs.build-artifact-name }}
+      wheel-artifact-name: ${{ needs.build-artifact-profiler.outputs.wheel-artifact-name }}
+      enabled-skus: bh_galaxy
+      # Select the perf entry by its test_group so adding more perf checks needs no workflow edit.
+      test-type: sdpa_perf
