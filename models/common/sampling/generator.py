@@ -139,18 +139,22 @@ class SamplingGenerator:
         sampling_params,
         prompt_tokens: torch.Tensor | None,
         empty_slots: list[int],
+        seed_slots: list[int] | None = None,
+        seed_positions: list[int] | torch.Tensor | None = None,
         replicate_seeds: bool = True,
     ):
         """Prepare sampling state for a prefill request.
 
         Resets params, seeds, prompt tokens, and output state in the correct order.
         """
+        if seed_slots is None:
+            seed_slots = empty_slots
         self.reset_sampling_params(sampling_params, empty_slots=empty_slots)
         seed = getattr(sampling_params, "seed", None)
         # assert on condition that seed is not None
         assert seed is not None, "sampling_params must be formatted (seed should be a list, not None)"
-        self.seed_manager.reset_seed(seed, empty_slots)
-        self.seed_manager.get_new_values(empty_slots, replicate_seeds=replicate_seeds)
+        self.seed_manager.reset_seed(seed, seed_slots)
+        self.seed_manager.get_new_values(seed_slots, replicate_seeds=replicate_seeds, positions=seed_positions)
         if prompt_tokens is not None:
             self.reset_prompt_tokens(prompt_tokens)
         self.reset_output_state()
@@ -200,6 +204,8 @@ class SamplingGenerator:
         if reset_batch:
             self.reset_prompt_tokens(prompt_tokens)
             self.reset_output_state(output_tokens)
+        self.seed_manager.update_decode_seeds(formatted_params.seed)
+        return formatted_params
 
     # ---------------------------------------------------------------------
     # Sampling helpers
@@ -600,6 +606,48 @@ class SeedManager:
             return 1
         return seed
 
+    @classmethod
+    def _stateless_device_seed_value(cls, seed: int, position: int) -> int:
+        """Derive a device seed from an API seed and absolute decode position.
+
+        vLLM can temporarily remove running requests from its persistent batch
+        while scheduling prefill-only steps. Slot-local RNG state is therefore
+        not a stable request identity. Explicit API seeds need to be
+        reproducible after such removals, so decode uses a deterministic
+        function of the public seed and token position instead of the transient
+        slot's RNG state.
+        """
+        mask = (1 << 64) - 1
+        x = (int(seed) & mask) ^ ((int(position) + 0x9E3779B97F4A7C15) & mask)
+        x = (x ^ (x >> 30)) * 0xBF58476D1CE4E5B9 & mask
+        x = (x ^ (x >> 27)) * 0x94D049BB133111EB & mask
+        x = x ^ (x >> 31)
+        return cls._device_seed_value(x & 0xFFFFFFFF)
+
+    def update_decode_seeds(self, seeds):
+        """Refresh explicit seed ownership for the current decode batch.
+
+        Decode batches in vLLM are rebuilt from request state each scheduler
+        step. Keep seed ownership aligned with the current batch slots, but do
+        not reset Python RNGs for explicit seeds; explicit decode seeds are
+        generated statelessly from ``(seed, position)``.
+        """
+        was_seed_active = self._seed_active
+        if seeds is None:
+            seeds = [None] * self.max_batch_size
+        seeds = list(seeds)
+        if len(seeds) < self.max_batch_size:
+            seeds = seeds + [None] * (self.max_batch_size - len(seeds))
+
+        for i, seed in enumerate(seeds[: self.max_batch_size]):
+            if seed is None and self.seeds[i] is not None:
+                self.rngs[i].seed(secrets.randbits(64))
+            self.seeds[i] = seed
+        self._seed_active = any(s is not None for s in self.seeds)
+        if was_seed_active and not self._seed_active:
+            self._reseted = True
+            self._needs_skip = False
+
     def apply_slot_remap(self, remap):
         """Reindex RNG state after batch condense.
 
@@ -641,13 +689,17 @@ class SeedManager:
         self._seed_active = any(s is not None for s in self.seeds)
         self._reseted = True
 
-    def get_new_values(self, empty_slots=None, replicate_seeds=False):
+    def get_new_values(self, empty_slots=None, replicate_seeds=False, positions=None):
         """Generate and push new seed values to the device.
 
         **Seeded path** (``_seed_active=True``):
-        Advances each slot's host-side RNG and copies the new values to the
-        device every step.  The device calls ``rand_tile_init`` with each
-        user's value, then ``rand_tile`` to produce the sampling tile.
+        During decode, callers can pass absolute token ``positions`` so
+        explicit API seeds derive device seeds from ``(seed, position)``
+        instead of transient batch-slot RNG state.  Without positions (prefill
+        and legacy callers), advances each selected slot's host-side RNG and
+        copies the new values to the device.  The device calls
+        ``rand_tile_init`` with each user's value, then ``rand_tile`` to
+        produce the sampling tile.
 
         **Unseeded path** (``_seed_active=False``):
         Uses a three-state machine to ensure each user gets a unique device
@@ -676,8 +728,46 @@ class SeedManager:
         """
         if empty_slots is None:
             empty_slots = range(self.max_batch_size)
+        empty_slots = list(empty_slots)
+        empty_slot_set = set(empty_slots)
 
-        if not self._seed_active:
+        sync_before_seed_upload = positions is not None and self._seed_active
+        if sync_before_seed_upload:
+            if hasattr(positions, "tolist"):
+                positions = positions.tolist()
+            positions = list(positions)
+            if len(positions) < self.max_batch_size:
+                positions = positions + [-1] * (self.max_batch_size - len(positions))
+
+            new_seeds = []
+            if replicate_seeds:
+                assert len(empty_slots) == 1, "Cannot replicate seeds if empty_slots is not length 1"
+                source_slot = empty_slots[0]
+                source_seed = self.seeds[source_slot]
+                source_rng = self.rngs[source_slot]
+                for position in positions[: self.max_batch_size]:
+                    position = int(position)
+                    if position < 0:
+                        new_seeds.append(MAX_UINT32)
+                    elif source_seed is None:
+                        new_seeds.append(self._device_seed_value(source_rng.randint(0, 1000000)))
+                    else:
+                        new_seeds.append(self._stateless_device_seed_value(source_seed, position))
+            else:
+                for i, rng in enumerate(self.rngs):
+                    if i not in empty_slot_set:
+                        new_seeds.append(MAX_UINT32)
+                        continue
+
+                    seed = self.seeds[i]
+                    position = int(positions[i])
+                    if position < 0:
+                        new_seeds.append(MAX_UINT32)
+                    elif seed is None:
+                        new_seeds.append(self._device_seed_value(rng.randint(0, 1000000)))
+                    else:
+                        new_seeds.append(self._stateless_device_seed_value(seed, position))
+        elif not self._seed_active:
             if self._reseted:
                 # State 1 (init): must take precedence over a pending
                 # transition so a new prefill always refreshes the device
@@ -698,15 +788,23 @@ class SeedManager:
         else:
             # Advance RNG for each user in empty_slots; non-active slots get MAX_UINT32.
             new_seeds = [
-                self._device_seed_value(rng.randint(0, 1000000)) if i in empty_slots else MAX_UINT32
+                self._device_seed_value(rng.randint(0, 1000000)) if i in empty_slot_set else MAX_UINT32
                 for i, rng in enumerate(self.rngs)
             ]
             if replicate_seeds:
                 assert len(empty_slots) == 1, "Cannot replicate seeds if empty_slots is not length 1"
                 new_seeds = self.max_batch_size * [new_seeds[empty_slots[0]]]
 
+        if sync_before_seed_upload:
+            # vLLM can submit steady decode traces asynchronously. The seed
+            # tensor is persistent trace input, so do not overwrite it until
+            # the previous trace replay has finished consuming it.
+            ttnn.synchronize_device(self.tt_sampling.mesh_device)
+
         new_seed_tt = ttnn.from_torch(
             torch.tensor(new_seeds), dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, mesh_mapper=self._seed_mapper
         )
         ttnn.copy_host_to_device_tensor(new_seed_tt, self.tt_sampling.seeds_tt_tensor)
+        if self._seed_active:
+            ttnn.synchronize_device(self.tt_sampling.mesh_device)
         self._reseted = False

@@ -10,7 +10,13 @@ import torch.nn.functional as F
 import ttnn
 import models.common.sampling.generator as sampling_generator_module
 from models.common.sampling import LogProbsCalculator
-from models.common.sampling.generator import MAX_UINT32, SamplingParams, SeedManager, format_sampling_params
+from models.common.sampling.generator import (
+    MAX_UINT32,
+    SamplingGenerator,
+    SamplingParams,
+    SeedManager,
+    format_sampling_params,
+)
 from models.common.sampling.tt_log_probs import MAX_TOP_LOGPROBS, LogProbsResult
 from models.common.utility_functions import comp_pcc
 
@@ -26,6 +32,7 @@ class _ZeroRng:
 def _make_seed_manager_for_host_tests(max_batch_size=4):
     fake_tt_sampling = SimpleNamespace(
         _sampling_dp=1,
+        mesh_device=object(),
         seeds_tt_tensor=object(),
     )
     return SeedManager(fake_tt_sampling, max_batch_size=max_batch_size)
@@ -40,6 +47,7 @@ def _capture_seed_uploads(monkeypatch):
 
     monkeypatch.setattr(sampling_generator_module.ttnn, "from_torch", fake_from_torch)
     monkeypatch.setattr(sampling_generator_module.ttnn, "copy_host_to_device_tensor", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sampling_generator_module.ttnn, "synchronize_device", lambda *_args, **_kwargs: None)
     return uploads
 
 
@@ -70,6 +78,45 @@ def test_seed_manager_never_uploads_zero_for_unseeded_random_init(monkeypatch):
     assert uploads[-1].tolist() == [MAX_UINT32] * 4
 
 
+def test_seeded_decode_seed_is_stable_after_slot_reuse(monkeypatch):
+    uploads = _capture_seed_uploads(monkeypatch)
+    manager = _make_seed_manager_for_host_tests()
+
+    manager.update_decode_seeds([0, None, None, None])
+    manager.get_new_values(positions=torch.tensor([12, -1, -1, -1]))
+    first_upload = uploads[-1].tolist()
+    first_seed = first_upload[0]
+
+    manager.reset_seed([1234], [0])
+    manager.get_new_values(empty_slots=[0])
+
+    manager.update_decode_seeds([0, None, None, None])
+    manager.get_new_values(positions=torch.tensor([12, -1, -1, -1]))
+    same_position_upload = uploads[-1].tolist()
+
+    manager.get_new_values(positions=torch.tensor([13, -1, -1, -1]))
+    next_position_upload = uploads[-1].tolist()
+
+    assert first_seed not in (0, MAX_UINT32)
+    assert same_position_upload == first_upload
+    assert next_position_upload[0] != first_seed
+    assert next_position_upload[1:] == [MAX_UINT32, MAX_UINT32, MAX_UINT32]
+
+
+def test_decode_seed_update_reinitializes_when_batch_becomes_unseeded(monkeypatch):
+    uploads = _capture_seed_uploads(monkeypatch)
+    monkeypatch.setattr(sampling_generator_module.random, "randint", lambda _low, _high: 0)
+    manager = _make_seed_manager_for_host_tests()
+
+    manager.update_decode_seeds([0, None, None, None])
+    manager.get_new_values(positions=torch.tensor([12, -1, -1, -1]))
+
+    manager.update_decode_seeds([None, None, None, None])
+    manager.get_new_values()
+
+    assert uploads[-1].tolist() == [1, 1, 1, 1]
+
+
 def test_format_sampling_params_broadcasts_scalar_seed_zero():
     params = SamplingParams(temperature=1.0, top_k=32, top_p=0.95, seed=0)
 
@@ -84,6 +131,49 @@ def test_format_sampling_params_pads_multi_seed_list_with_none():
     formatted = format_sampling_params(params, max_batch_size=32)
 
     assert formatted.seed[:4] == [0, 7, None, None]
+
+
+def test_apply_prefill_state_can_use_distinct_seed_slots():
+    calls = []
+    generator = object.__new__(SamplingGenerator)
+    generator.reset_sampling_params = lambda sampling_params, empty_slots=None: calls.append(("params", empty_slots))
+    generator.reset_prompt_tokens = lambda prompt_tokens: calls.append(("prompt", prompt_tokens))
+    generator.reset_output_state = lambda tokens=None: calls.append(("output", tokens))
+    generator.seed_manager = SimpleNamespace(
+        reset_seed=lambda seed, user_ids: calls.append(("reset_seed", seed, user_ids)),
+        get_new_values=lambda empty_slots, replicate_seeds=False, positions=None: calls.append(
+            ("get_new_values", empty_slots, replicate_seeds, positions)
+        ),
+    )
+    params = SimpleNamespace(seed=[0] * 128)
+
+    SamplingGenerator.apply_prefill_state(
+        generator,
+        sampling_params=params,
+        prompt_tokens=None,
+        empty_slots=[3],
+        seed_slots=[35],
+        replicate_seeds=True,
+    )
+
+    assert calls == [
+        ("params", [3]),
+        ("reset_seed", params.seed, [35]),
+        ("get_new_values", [35], True, None),
+        ("output", None),
+    ]
+
+
+def test_seeded_replicated_prefill_uses_positioned_rows(monkeypatch):
+    uploads = _capture_seed_uploads(monkeypatch)
+    manager = _make_seed_manager_for_host_tests()
+
+    manager.reset_seed([0], [0])
+    manager.get_new_values(empty_slots=[0], replicate_seeds=True, positions=[40, 41, 42, 43])
+    values = uploads[-1].tolist()
+
+    assert len(set(values)) == 4
+    assert values[3] == SeedManager._stateless_device_seed_value(0, 43)
 
 
 # ---------------------------------------------------------------------------

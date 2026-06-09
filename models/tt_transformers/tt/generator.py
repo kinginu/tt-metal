@@ -556,6 +556,16 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
             enable_trace = False
 
         sampling_on_device_requested = sampling_params is not None
+        def _has_explicit_seed(seed):
+            if seed is None:
+                return False
+            if hasattr(seed, "tolist"):
+                seed = seed.tolist()
+            if isinstance(seed, list):
+                return any(s is not None for s in seed)
+            return True
+
+        explicit_seed_requested = sampling_on_device_requested and _has_explicit_seed(getattr(sampling_params, "seed", None))
 
         # we need this here because of tt-metal tests
         if warmup_prefill:
@@ -647,6 +657,10 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         )
 
         # Batched prefill passes a per-user `last_token_idx` *list* (and a list
+        if use_batched_prefill and explicit_seed_requested:
+            logger.info("Batched prefill disabled: explicit sampling seeds require the single-user prefill path for deterministic replay")
+            use_batched_prefill = False
+
         # `user_id`) into prefill_forward_single_user_text. That function's
         # chunked-prefill branch only supports a single sequence with a scalar
         # last_token_idx -- it compares/slices it arithmetically
@@ -824,13 +838,17 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     broadcast_sampling_params(sampling_params, idx, slot_len=total_batch), total_batch
                 )
                 assert per_request_params is not None, "Sampling was executed but missing per-request sampling params"
-                # empty_slots uses max_batch_size_per_model (not total_batch) because
-                # the seed manager operates on per-row slots (0..31).  When sampling_dp > 1
-                # the params are already broadcast across all rows by broadcast_sampling_params.
+                local_slot = user_id % max_batch_size_per_model
+                seed_slots = [user_id] if sampling_dp > 1 else [local_slot]
+                target_row = (last_token_idx - num_cached_tokens) % 32
+                seed_base_position = last_token_idx - target_row
+                seed_positions = list(range(seed_base_position, seed_base_position + total_batch))
                 self.model[model_id].sampling.apply_prefill_state(
                     sampling_params=per_request_params,
                     prompt_tokens=prefill_ids[:, :seq_len].repeat(total_batch, 1),
-                    empty_slots=[user_id % max_batch_size_per_model],
+                    empty_slots=[local_slot],
+                    seed_slots=seed_slots,
+                    seed_positions=seed_positions,
                 )
 
             if enable_trace_current_prompt:
@@ -872,14 +890,17 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     combined_params = format_sampling_params(sampling_params, sampling_batch)
                     max_prompt_len = max(int(prompt_lens[i]) for i in range(len(empty_slots)))
                     combined_prompt_tokens = torch.zeros(sampling_batch, max_prompt_len, dtype=torch.long)
+                    seed_positions = [-1] * sampling_batch
                     for local_idx, slot in enumerate(empty_slots):
                         plen = int(prompt_lens[local_idx])
                         combined_prompt_tokens[slot, :plen] = prefill_ids[slot, :plen]
+                        seed_positions[slot] = int(last_token_idx[slot])
 
                     sampling_module.apply_prefill_state(
                         sampling_params=combined_params,
                         prompt_tokens=combined_prompt_tokens,
                         empty_slots=empty_slots,
+                        seed_positions=seed_positions,
                         replicate_seeds=False,
                     )
 
@@ -892,7 +913,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     )
 
                     sampling_trace_key = f"sampling_{prefill_seq_len}_{model_id}_{sampling_batch}_{sampling_dp}"
-                    if enable_trace_current_prompt:
+                    if enable_trace_current_prompt and not explicit_seed_requested:
                         if self.trace_id_prefill_sampling[sampling_trace_key] is None:
                             (
                                 s_trace_id,
@@ -1220,7 +1241,20 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
             self.model[i].switch_mode(Mode.DECODE)
 
         sampling_on_device = sampling_params is not None
-        split_sampling_enabled = bool(self.enable_split_sampling and sampling_on_device)
+
+        def _has_explicit_seed(seed):
+            if seed is None:
+                return False
+            if hasattr(seed, "tolist"):
+                seed = seed.tolist()
+            if isinstance(seed, list):
+                return any(s is not None for s in seed)
+            return True
+
+        explicit_seed_requested = _has_explicit_seed(getattr(sampling_params, "seed", None))
+        split_sampling_enabled = bool(
+            self.enable_split_sampling and sampling_on_device and not explicit_seed_requested
+        )
         self._set_sampling_trace_mode(split_sampling_enabled)
 
         B = tokens.shape[0]
@@ -1273,7 +1307,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     else None
                 )
 
-                sampling_module.apply_decode_state(
+                formatted_params = sampling_module.apply_decode_state(
                     model_chunks,
                     reset_batch=reset_batch,
                     prompt_tokens=model_prompt,
@@ -1284,7 +1318,8 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                     sm_bs = sampling_module.seed_manager.max_batch_size
                     rank_remap = slot_remap[i * sm_bs : (i + 1) * sm_bs]
                     sampling_module.seed_manager.apply_slot_remap(rank_remap)
-                sampling_module.seed_manager.get_new_values()
+                sampling_module.seed_manager.update_decode_seeds(formatted_params.seed)
+                sampling_module.seed_manager.get_new_values(positions=start_pos[i])
 
         decode_kwargs = {
             "current_pos": start_pos,
@@ -1441,20 +1476,29 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
         """
         Run decode forward text with tracing
         """
-        # The trace is different depending on whether we are doing device sampling or not
-        if not self.trace_ids_decode[sampling_on_device]:
+        split_sampling_trace = False
+        if sampling_on_device:
+            split_sampling_trace = any(
+                getattr(getattr(model_instance, "sampling", None), "enable_internal_trace", False)
+                for model_instance in self.model
+            )
+        trace_key = (sampling_on_device, split_sampling_trace)
+
+        # The trace is different depending on whether we are doing device sampling
+        # and whether sampling is captured inside decode or as its own trace.
+        if not self.trace_ids_decode[trace_key]:
             trace_ids, tt_out_trace, *device_inputs = self._capture_decode_trace_text(
                 tokens, current_pos, page_table=page_table, kv_cache=kv_cache, sampling_on_device=sampling_on_device
             )
-            self.trace_ids_decode[sampling_on_device] = trace_ids
-            self.trace_inputs_decode[sampling_on_device] = device_inputs
-            self.trace_output_decode[sampling_on_device] = tt_out_trace
+            self.trace_ids_decode[trace_key] = trace_ids
+            self.trace_inputs_decode[trace_key] = device_inputs
+            self.trace_output_decode[trace_key] = tt_out_trace
 
         # reset inputs when mode switches from prefill to decode,
-        # or when sampling_on_device changes (different trace has stale inputs)
-        prev_sampling_on_device = getattr(self, "_prev_sampling_on_device", None)
-        self._prev_sampling_on_device = sampling_on_device
-        sampling_mode_changed = prev_sampling_on_device is not None and prev_sampling_on_device != sampling_on_device
+        # or when the decode trace mode changes (different trace has stale inputs)
+        prev_decode_trace_key = getattr(self, "_prev_decode_trace_key", None)
+        self._prev_decode_trace_key = trace_key
+        sampling_mode_changed = prev_decode_trace_key is not None and prev_decode_trace_key != trace_key
         reset_inputs = reset_batch or not sampling_on_device or sampling_mode_changed
         page_table_changed = page_table is not None and (
             self.prev_page_table is None
@@ -1474,7 +1518,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                 host_inputs_i = self.model[i].prepare_decode_inputs_host(tokens[i], current_pos[i], user_page_table)
                 copy_host_to_device(
                     host_tensors=host_inputs_i,
-                    device_tensors=self.trace_inputs_decode[sampling_on_device][i],
+                    device_tensors=self.trace_inputs_decode[trace_key][i],
                 )
             elif page_table_changed:
                 # With async device sampling, token/position inputs may
@@ -1484,15 +1528,15 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                 # preserve device-produced tokens.
                 host_inputs_i = self.model[i].prepare_decode_inputs_host(tokens[i], current_pos[i], user_page_table)
                 host_page_table = host_inputs_i[DECODE_PAGE_TABLE_INPUT_IDX]
-                device_page_table = self.trace_inputs_decode[sampling_on_device][i][DECODE_PAGE_TABLE_INPUT_IDX]
+                device_page_table = self.trace_inputs_decode[trace_key][i][DECODE_PAGE_TABLE_INPUT_IDX]
                 if host_page_table is not None:
                     ttnn.copy_host_to_device_tensor(host_page_table, device_page_table)
 
         if page_table_changed:
             self.prev_page_table = tuple(pt.clone() for pt in page_table)
-        for i, trace_id in self.trace_ids_decode[sampling_on_device].items():
+        for i, trace_id in self.trace_ids_decode[trace_key].items():
             ttnn.execute_trace(self.model_args[i].mesh_device, trace_id, cq_id=0, blocking=False)
-        outputs = self.trace_output_decode[sampling_on_device]
+        outputs = self.trace_output_decode[trace_key]
         if sampling_on_device:
             new_outputs = []
             for i in range(self.data_parallel):
@@ -1504,7 +1548,7 @@ class Generator(ModelCapabilitiesMixin, WarmupForwardMixin):
                 new_outputs.append(
                     sampling_module.sample(
                         logits=outputs[i],
-                        tt_out_tok=self.trace_inputs_decode[sampling_on_device][i][0],
+                        tt_out_tok=self.trace_inputs_decode[trace_key][i][0],
                     )
                 )
             return new_outputs
