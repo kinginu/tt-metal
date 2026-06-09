@@ -10,6 +10,7 @@
 #include "llk_math_eltwise_sfpu_common.h"
 
 template <class F, class... ARGS>
+[[deprecated("Use SFPU_CALL, SFPU_CALL_MODE, SFPU_CALL_FN, or SFPU_CALL_CAST from llk_math_eltwise_unary_sfpu_macros.h instead.")]]
 inline void _llk_math_eltwise_unary_sfpu_params_(F&& sfpu_func, std::uint32_t dst_tile_index, ARGS&&... args)
 {
     _llk_math_eltwise_sfpu_params_(std::forward<F>(sfpu_func), dst_tile_index, std::forward<ARGS>(args)...);

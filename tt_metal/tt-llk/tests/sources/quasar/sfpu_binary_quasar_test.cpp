@@ -89,6 +89,8 @@ void run_kernel(RUNTIME_PARAMETERS params)
     const int in1_offset      = params.SRC1_TILE_IDX * tile_stride;
     const int out_offset      = params.DST_TILE_IDX * tile_stride;
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
 #if defined(SFPU_INT_OP_MUL)
     _llk_math_eltwise_binary_sfpu_params_<false>(
         _mul_int32_<false, 8>, 0, num_sfpu_iterations, in0_offset, in1_offset, out_offset);
@@ -108,6 +110,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
     _llk_math_eltwise_binary_sfpu_params_<false>(
         _add_int_<false, 8, 0, false>, 0, src_format, num_sfpu_iterations, in0_offset, in1_offset, out_offset);
 #endif
+#pragma GCC diagnostic pop
 
     _llk_math_set_dvalid_<p_cleardvalid::SFPU, dest_sync>();
 }

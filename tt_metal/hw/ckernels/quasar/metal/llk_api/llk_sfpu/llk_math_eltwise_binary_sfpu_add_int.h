@@ -39,6 +39,8 @@ inline void llk_math_eltwise_binary_sfpu_add_int(
     const int in1_offset = static_cast<int>(idst1) * tile_stride;
     const int out_offset = static_cast<int>(odst) * tile_stride;
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     _llk_math_eltwise_binary_sfpu_params_<APPROXIMATE>(
         ckernel::sfpu::_add_int_<APPROXIMATE, ITERATIONS, 0, SIGN_MAGNITUDE_FORMAT>,
         0,
@@ -47,6 +49,7 @@ inline void llk_math_eltwise_binary_sfpu_add_int(
         in0_offset,
         in1_offset,
         out_offset);
+#pragma GCC diagnostic pop
 }
 
 }  // namespace ckernel

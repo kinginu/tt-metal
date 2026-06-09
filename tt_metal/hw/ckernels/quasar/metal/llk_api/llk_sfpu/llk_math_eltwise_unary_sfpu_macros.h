@@ -35,7 +35,10 @@ template <DstSync DST_SYNC, bool DST_ACCUM, typename Callable, typename... Args>
 inline __attribute__((always_inline)) void _sfpu_check_and_call_(
     Callable&& sfpu_func, std::uint32_t dst_index, [[maybe_unused]] VectorMode vector_mode, Args&&... args) {
     LLK_ASSERT(vector_mode == VectorMode::RC, "Quasar currently only supports vector mode RC");
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     _llk_math_eltwise_unary_sfpu_params_(std::forward<Callable>(sfpu_func), dst_index, std::forward<Args>(args)...);
+#pragma GCC diagnostic pop
 }
 
 }  // namespace ckernel

@@ -45,6 +45,8 @@ inline void _llk_math_eltwise_ternary_sfpu_init_()
  * @param args            Extra arguments forwarded to @p sfpu_func after the tile indices.
  */
 template <class F, class... ARGS>
+[[deprecated(
+    "Use SFPU_TERNARY_CALL, SFPU_TERNARY_CALL_MODE, SFPU_TERNARY_CALL_FN, or SFPU_TERNARY_CALL_CAST from llk_math_eltwise_ternary_sfpu_macros.h instead.")]]
 inline void _llk_math_eltwise_ternary_sfpu_params_(
     F&& sfpu_func,
     std::uint32_t dst_index_in0,

@@ -9,7 +9,9 @@
 
 #include "llk_assert.h"
 #include "llk_math_eltwise_unary_sfpu_init.h"
+#define TT_SFPU_PARAMS_INTERNAL_USE
 #include "llk_math_eltwise_unary_sfpu_params.h"
+#undef TT_SFPU_PARAMS_INTERNAL_USE
 
 /*
  * SFPU invocation helper
@@ -35,8 +37,11 @@ inline __attribute__((always_inline)) void _sfpu_check_and_call_(
     LLK_ASSERT(
         (dst_index < get_dest_max_tiles<DST_SYNC, DST_ACCUM, DstTileShape::Tile32x32>()),
         "dst_index exceeds max dest tiles");
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
     _llk_math_eltwise_unary_sfpu_params_(
         std::forward<Callable>(sfpu_func), dst_index, vector_mode, std::forward<Args>(args)...);
+#pragma GCC diagnostic pop
 }
 
 }  // namespace ckernel
