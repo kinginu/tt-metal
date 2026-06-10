@@ -106,7 +106,7 @@ inline void bitonic_topk_load8(std::uint32_t offset, std::uint32_t dist)
 {
     constexpr std::uint32_t dst_indices_offset = 128;
     constexpr std::uint32_t instr_mod_value    = is_fp32_dest_acc_en ? p_sfpu::sfpmem::FP32 : p_sfpu::sfpmem::FP16B;
-    constexpr std::uint32_t instr_mod_index    = is_fp32_dest_acc_en ? p_sfpu::sfpmem::INT32 : p_sfpu::sfpmem::INT16;
+    constexpr std::uint32_t instr_mod_index    = is_fp32_dest_acc_en ? p_sfpu::sfpmem::INT32 : p_sfpu::sfpmem::UINT16;
 
     std::uint32_t face_offset = offset >> 4;
     std::uint32_t ld_offset   = (offset & 0xF) + face_offset * 32;
@@ -126,7 +126,7 @@ inline void bitonic_topk_store8(std::uint32_t offset, std::uint32_t dist)
 {
     constexpr std::uint32_t dst_indices_offset = 128;
     constexpr std::uint32_t instr_mod_value    = is_fp32_dest_acc_en ? p_sfpu::sfpmem::FP32 : p_sfpu::sfpmem::FP16B;
-    constexpr std::uint32_t instr_mod_index    = is_fp32_dest_acc_en ? p_sfpu::sfpmem::INT32 : p_sfpu::sfpmem::INT16;
+    constexpr std::uint32_t instr_mod_index    = is_fp32_dest_acc_en ? p_sfpu::sfpmem::INT32 : p_sfpu::sfpmem::UINT16;
 
     std::uint32_t face_offset = offset >> 4;
     std::uint32_t ld_offset   = (offset & 0xF) + face_offset * 32;
@@ -148,7 +148,7 @@ inline void bitonic_topk_load16(std::uint32_t dist0, std::uint32_t dist1)
 {
     constexpr std::uint32_t dst_indices_offset = 128;
     constexpr std::uint32_t instr_mod_value    = is_fp32_dest_acc_en ? p_sfpu::sfpmem::FP32 : p_sfpu::sfpmem::FP16B;
-    constexpr std::uint32_t instr_mod_index    = is_fp32_dest_acc_en ? p_sfpu::sfpmem::INT32 : p_sfpu::sfpmem::INT16;
+    constexpr std::uint32_t instr_mod_index    = is_fp32_dest_acc_en ? p_sfpu::sfpmem::INT32 : p_sfpu::sfpmem::UINT16;
 
     // Values
     TTI_SFPLOAD(p_sfpu::LREG0, instr_mod_value, ADDR_MOD_7, 0, 0);
@@ -190,7 +190,7 @@ inline void bitonic_topk_store16(std::uint32_t dist0, std::uint32_t dist1)
 {
     constexpr std::uint32_t dst_indices_offset = 128;
     constexpr std::uint32_t instr_mod_value    = is_fp32_dest_acc_en ? p_sfpu::sfpmem::FP32 : p_sfpu::sfpmem::FP16B;
-    constexpr std::uint32_t instr_mod_index    = is_fp32_dest_acc_en ? p_sfpu::sfpmem::INT32 : p_sfpu::sfpmem::INT16;
+    constexpr std::uint32_t instr_mod_index    = is_fp32_dest_acc_en ? p_sfpu::sfpmem::INT32 : p_sfpu::sfpmem::UINT16;
 
     // Values
     TTI_SFPSTORE(p_sfpu::LREG0, instr_mod_value, ADDR_MOD_7, 0, 0);
