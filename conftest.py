@@ -738,7 +738,7 @@ def mesh_device(request, silicon_arch_name, device_params):
         device_params["trace_region_size"] = override_trace_region_size
         logger.info(f"Overriding trace region size to {override_trace_region_size}")
 
-    updated_device_params = get_updated_device_params(device_params, arch_name=silicon_arch_name)
+    updated_device_params = get_updated_device_params(device_params)
     fabric_config = updated_device_params.pop("fabric_config", None)
     fabric_tensix_config = updated_device_params.pop("fabric_tensix_config", None)
     reliability_mode = updated_device_params.pop("reliability_mode", None)
