@@ -51,6 +51,10 @@ class TT_CCL:
     ):
         self.mode = mode
         self.is_qwen = is_qwen
+        # Wormhole / TG always run with the prefetcher; the Blackhole bring-up runs without it.
+        # The no-prefetcher (Blackhole) buffer-sizing and stable-CCL fallbacks below are gated on
+        # this so the prefetcher (Wormhole) path stays byte-for-byte identical to main.
+        self.use_prefetcher = getattr(model_args, "use_prefetcher", True)
         all_crs = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(6, 9))])
 
         self.mesh_device = mesh_device
@@ -62,7 +66,7 @@ class TT_CCL:
         # When prefetcher is disabled, use the default full-device subdevice id.
         self.worker_sub_device_id = worker_sub_device_id if worker_sub_device_id is not None else ttnn.SubDeviceId(0)
         self.model_config = model_args.model_config
-        if mode == "decode" and is_qwen:
+        if mode == "decode" and is_qwen and not self.use_prefetcher:
             # Runtime guard: keep Qwen decode interim shards well above kernel minimum.
             self.model_config["REDUCE_SCATTER_INTERIM_MEMCFG"] = self._ensure_min_interim_shard_width(
                 self.model_config.get("REDUCE_SCATTER_INTERIM_MEMCFG"), 1280
@@ -483,10 +487,15 @@ class TT_CCL:
 
         # Create persistent buffers for cluster axis 1
         cluster_axis = 1
-        buffer_mem_cfg = self._ensure_min_interim_shard_width(
-            self.model_config["REDUCE_SCATTER_INTERIM_MEMCFG"], 1280 if self.is_qwen else 512
-        )
-        shard_width = buffer_mem_cfg.shard_spec.shape[1]
+        if self.use_prefetcher:
+            # Wormhole / prefetcher path: identical to main.
+            buffer_mem_cfg = self.model_config["REDUCE_SCATTER_INTERIM_MEMCFG"]
+            shard_width = 512  # 512 = 4 devices * 4 pages per packet * 32 tile_width
+        else:
+            buffer_mem_cfg = self._ensure_min_interim_shard_width(
+                self.model_config["REDUCE_SCATTER_INTERIM_MEMCFG"], 1280 if self.is_qwen else 512
+            )
+            shard_width = buffer_mem_cfg.shard_spec.shape[1]
         for _ in range(self.num_cbs):
             tt_buffer = (
                 # Derive packet width from memcfg (BH needs 640 here).
@@ -517,14 +526,23 @@ class TT_CCL:
 
         # Create persistent buffers for cluster axis 1
         cluster_axis = 1
-        rs_interim_memcfg = self.model_config.get(
-            "REDUCE_SCATTER_INTERIM_MEMCFG", self.model_config["RS_CREATE_HEADS_INTERIM_MEMCFG"]
-        )
-        buffer_mem_cfg = self._ensure_min_interim_shard_width(rs_interim_memcfg, 1280 if self.is_qwen else 512)
-        shard_height = buffer_mem_cfg.shard_spec.shape[0]
-        shard_width = buffer_mem_cfg.shard_spec.shape[1]
-        num_shard_cores = buffer_mem_cfg.shard_spec.num_cores()
-        torch_buffer = torch.zeros((*cluster_shape, shard_height, shard_width * num_shard_cores))
+        if self.use_prefetcher:
+            # Wormhole / prefetcher path: identical to main.
+            num_pages_per_packet = 4
+            shard_height = 32
+            buffer_mem_cfg = self.model_config["RS_CREATE_HEADS_INTERIM_MEMCFG"]
+            torch_buffer = torch.zeros(
+                (*cluster_shape, shard_height, cluster_shape[cluster_axis] * num_pages_per_packet * 32 * 5)
+            )
+        else:
+            rs_interim_memcfg = self.model_config.get(
+                "REDUCE_SCATTER_INTERIM_MEMCFG", self.model_config["RS_CREATE_HEADS_INTERIM_MEMCFG"]
+            )
+            buffer_mem_cfg = self._ensure_min_interim_shard_width(rs_interim_memcfg, 1280 if self.is_qwen else 512)
+            shard_height = buffer_mem_cfg.shard_spec.shape[0]
+            shard_width = buffer_mem_cfg.shard_spec.shape[1]
+            num_shard_cores = buffer_mem_cfg.shard_spec.num_cores()
+            torch_buffer = torch.zeros((*cluster_shape, shard_height, shard_width * num_shard_cores))
         persistent_buffers[cluster_axis] = ttnn.from_torch(
             torch_buffer,
             device=self.mesh_device,
@@ -1219,8 +1237,9 @@ class TT_CCL:
             topology = self.model_config["CCL_TOPOLOGY"]
             assert buffer_key is not None, "buffer_key is None"
             persistent_buffer = self.all_gather_buffers.get(buffer_key, None)
-        if use_experimental_all_gather:
-            # Legacy async path kept as opt-in for performance experiments.
+        if use_experimental_all_gather or self.use_prefetcher:
+            # Wormhole / prefetcher path uses the experimental async all-gather (identical to main).
+            # The Blackhole no-prefetcher bring-up uses the stable public all_gather below.
             barrier_semaphore = None
             if persistent_buffer is None:
                 barrier_semaphore = self.get_and_cycle_barrier_semaphore_handle(cluster_axis)
@@ -1420,6 +1439,25 @@ class TT_CCL:
         use_noc1_only=False,
         batch_first=False,
     ):
+        if self.use_prefetcher:
+            # Wormhole / prefetcher path: identical to main (fused experimental all_gather_concat).
+            ttnn_tensor_out = ttnn.experimental.all_gather_concat(
+                input_tensor_mesh,
+                self.all_gather_concat_inter_tensor[0],
+                dim,
+                cluster_axis=cluster_axis,
+                mesh_device=self.mesh_device,
+                topology=self.model_config["CCL_TOPOLOGY"],
+                multi_device_global_semaphore=self.gather_semaphore_handles[cluster_axis][self.gather_idx[cluster_axis]],
+                num_links=num_links,
+                num_heads=num_heads,
+                memory_config=memory_config,
+                subdevice_id=self.worker_sub_device_id,
+                use_noc1_only=use_noc1_only,
+            )
+            self.gather_idx[cluster_axis] = (self.gather_idx[cluster_axis] + 1) % self.num_cbs
+            return ttnn_tensor_out
+
         # Non-experimental fallback path: all-gather heads, then concatenate heads.
         # num_links is forced to 1 for decode stability.
         effective_num_links = 1

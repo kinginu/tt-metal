@@ -391,7 +391,9 @@ class TtQwenModelArgs(TtModelArgs):
             num_cores_ln = core_grid_ln[0] * core_grid_ln[1]
             residual_grid = self.dram_shard_core_grid_for_k(self.dim // self.num_devices)
             # Decode width-sharded paths operate on tile-padded batch rows.
-            decode_shard_height = self.tile_padded_batch_rows
+            # Wormhole keeps main's fixed height (32); only the Blackhole bring-up path uses the
+            # tile-padded batch rows.
+            decode_shard_height = self.tile_padded_batch_rows if self.is_blackhole else 32
             # Always use Galaxy configuration
             self.model_config["DECODE_RESIDUAL_MEMCFG"] = ttnn.create_sharded_memory_config(
                 shape=(

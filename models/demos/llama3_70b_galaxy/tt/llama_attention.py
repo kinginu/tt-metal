@@ -898,8 +898,7 @@ class TtLlamaAttention(LightweightModule):
                 attn_output_1G4D_sharded,
                 dim=1,
                 cluster_axis=1,
-                num_links=1,
-                batch_first=True,
+                num_links=self.model_config["GALAXY_NUM_LINKS"],
                 memory_config=self.model_config["SHARDED_ATTN_WO_INPUT_RING_MEMCFG"],
                 num_heads=self.n_local_heads,
             )
@@ -977,6 +976,8 @@ class TtLlamaAttention(LightweightModule):
 
         seq_len = x_11SH.shape[-2]
         assert seq_len % 128 == 0 and seq_len > 0, "Seqlen must be divisible by 128"
+        # Wormhole keeps main's fixed prefill link count (3); Blackhole uses the mesh link budget.
+        prefill_num_links = self.model_config["GALAXY_NUM_LINKS"] if self.is_blackhole else 3
         ###
         # QKV matmuls
         ###
@@ -1021,7 +1022,7 @@ class TtLlamaAttention(LightweightModule):
         xqkv_fused = self.tt_ccl.line_all_reduce(
             xqkv,
             cluster_axis=1,
-            num_links=self.model_config["GALAXY_NUM_LINKS"],
+            num_links=prefill_num_links,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
             buffer_key="QKV",
             batch_size=batch_size,
@@ -1187,7 +1188,7 @@ class TtLlamaAttention(LightweightModule):
                 attn_output_84SD = self.tt_ccl.line_all_reduce(
                     attn_output_84SD,
                     cluster_axis=1,
-                    num_links=self.model_config["GALAXY_NUM_LINKS"],
+                    num_links=prefill_num_links,
                     memory_config=ttnn.DRAM_MEMORY_CONFIG,
                     buffer_key="ATTN_REPLICATE",
                 )
@@ -1288,7 +1289,7 @@ class TtLlamaAttention(LightweightModule):
         output_11SH_reduced = self.tt_ccl.line_all_reduce(
             output_11SH,
             cluster_axis=0,
-            num_links=self.model_config["GALAXY_NUM_LINKS"],
+            num_links=prefill_num_links,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
             buffer_key="WO_AG" if seq_len <= 4096 else "WO",
         )

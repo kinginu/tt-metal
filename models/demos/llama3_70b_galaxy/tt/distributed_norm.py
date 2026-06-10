@@ -23,7 +23,13 @@ class DistributedNorm(LightweightModule):
         )
         num_cores_ln = core_grid_ln[0] * core_grid_ln[1]
         hidden_size_per_device_distributed_ln = args.dim // 4
-        if norm.output_mem_config is not None and norm.output_mem_config.shard_spec is not None:
+        blackhole_no_prefetcher = (not getattr(args, "use_prefetcher", True)) and getattr(
+            args, "is_blackhole", False
+        )
+        if not blackhole_no_prefetcher:
+            # Wormhole / prefetcher path keeps main's fixed decode shard height (32 -> block_h 1).
+            decode_shard_height = 32
+        elif norm.output_mem_config is not None and norm.output_mem_config.shard_spec is not None:
             decode_shard_height = norm.output_mem_config.shard_spec.shape[0]
         else:
             decode_residual_memcfg = args.get_model_config().get("DECODE_RESIDUAL_MEMCFG", None)
