@@ -780,11 +780,19 @@ _CHUNKED_SCENARIOS = (
 )
 
 
-# TODO(FABRIC_2D): the BH Galaxy 8x4 prefill target moved to FABRIC_2D (#45595, which fixed the MLA
-# ring all-gather writer this path uses). Add a fabric2d device_params variant (router config +
-# RELAXED_INIT + per-mesh num_links, via conftest's FABRIC_2D_PREFILL_BLOCK_MESH_PARAMS) in a
-# follow-up, validated on BH Galaxy. This test currently covers FABRIC_1D only.
-@pytest.mark.parametrize("device_params", [{"fabric_config": ttnn.FabricConfig.FABRIC_1D}], ids=["line"], indirect=True)
+@pytest.mark.parametrize(
+    "device_params",
+    [
+        {"fabric_config": ttnn.FabricConfig.FABRIC_1D},
+        {
+            "fabric_config": ttnn.FabricConfig.FABRIC_2D,
+            "fabric_router_config": create_fabric_router_config(max_payload_size=get_max_payload_size()),
+            "reliability_mode": ttnn.FabricReliabilityMode.RELAXED_INIT,
+        },
+    ],
+    ids=["line", "fabric2d"],
+    indirect=True,
+)
 @pytest.mark.parametrize("mesh_device", [(2, 2), (2, 4), (8, 4)], ids=["2x2", "2x4", "8x4"], indirect=True)
 @pytest.mark.parametrize("reference", ["cpu", "trace", None], ids=["cpu", "trace", "func"])
 @pytest.mark.parametrize("kwargs", [kw for _, kw in _CHUNKED_SCENARIOS], ids=[sid for sid, _ in _CHUNKED_SCENARIOS])
