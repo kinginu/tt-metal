@@ -99,9 +99,8 @@ struct TestConfig {
     GoldenFunc golden_function;
 };
 
-// Compute golden + validate; shared between the Metal 2.0 helper and the Gen1-only
-// UNPACK_A_B helper (whose compute kernel `unpack_tilizeA_B.cpp` has no DFB rewrite
-// in scope for this migration; see `run_single_core_unpack_tilizeA_B_program`).
+// Compute golden + validate; shared between both Metal 2.0 helpers
+// (`run_single_core_tilize_program` and `run_single_core_unpack_tilizeA_B_program`).
 static void validate_result(
     const TestConfig& test_config,
     const std::vector<uint32_t>& src0_vec,
@@ -326,19 +325,7 @@ void run_single_core_tilize_program(
         .source = compute_kernel,
         .num_threads = 1,
         .compiler_options = {.defines = compute_defines},
-        .dfb_bindings =
-            {{
-                 .dfb_spec_name = INPUT_DFB,
-                 .accessor_name = "in",
-                 .endpoint_type = experimental::DFBEndpointType::CONSUMER,
-                 .access_pattern = experimental::DFBAccessPattern::STRIDED,
-             },
-             {
-                 .dfb_spec_name = OUTPUT_DFB,
-                 .accessor_name = "out",
-                 .endpoint_type = experimental::DFBEndpointType::PRODUCER,
-                 .access_pattern = experimental::DFBAccessPattern::STRIDED,
-             }},
+        .dfb_bindings = {experimental::ConsumerOf(INPUT_DFB, "in"), experimental::ProducerOf(OUTPUT_DFB, "out")},
         .compile_time_args = compute_cta_bindings,
         .hw_config =
             experimental::ComputeHardwareConfig{
@@ -408,95 +395,128 @@ void run_single_core_tilize_program(
     validate_result(test_config, src0_vec, /*src1_vec=*/{}, result_vec);
 }
 
-// Gen1-only single-core helper for the `unpack_tilizeA_B` compute kernel. The Quasar LLK
-// does not implement the `tilizeA_B` family — `tt_metal/hw/inc/api/compute/tilize.h` gates the
-// entire `unpack_tilizeA_B_*` / `tilizeA_B_*` API behind `#ifndef ARCH_QUASAR`, and the
-// `llk_unpack_tilizeA_B*` symbols only exist in `tt_llk_blackhole/` and `tt_llk_wormhole_b0/`.
-// The caller (`TensixComputeUnpackTilizeA_B`) therefore skips on Quasar;
+// Metal 2.0 single-core helper for the `unpack_tilizeA_B` compute kernel.
+// Two-input dataflow: DRAM(src0) + DRAM(src1) --> Reader --> [inp0 + inp1] --> Compute --> [out] --> Writer --> DRAM.
 void run_single_core_unpack_tilizeA_B_program(
     const std::shared_ptr<distributed::MeshDevice>& mesh_device, const TestConfig& test_config) {
     auto& cq = mesh_device->mesh_command_queue();
-    distributed::MeshWorkload workload;
-    auto zero_coord = distributed::MeshCoordinate(0, 0);
-    auto device_range = distributed::MeshCoordinateRange(zero_coord, zero_coord);
-    Program program = tt::tt_metal::CreateProgram();
-    workload.add_program(device_range, std::move(program));
-    auto& program_ = workload.get_programs().at(device_range);
-    auto* device = mesh_device->get_devices()[0];
+    auto* dev = mesh_device->get_devices()[0];
+    const experimental::NodeCoord node{0, 0};
 
-    CoreCoord core = {0, 0};
-
-    uint32_t num_tiles = test_config.num_tiles_r * test_config.num_tiles_c;
-    uint32_t input_dram_buffer_size = test_config.input_single_tile_size * num_tiles;
-    uint32_t output_dram_buffer_size = test_config.output_single_tile_size * num_tiles;
+    const uint32_t num_tiles = test_config.num_tiles_r * test_config.num_tiles_c;
+    const uint32_t input_dram_buffer_size = test_config.input_single_tile_size * num_tiles;
+    const uint32_t output_dram_buffer_size = test_config.output_single_tile_size * num_tiles;
 
     tt_metal::InterleavedBufferConfig input_dram_config{
-        .device = device,
+        .device = dev,
         .size = input_dram_buffer_size,
         .page_size = input_dram_buffer_size,
         .buffer_type = tt_metal::BufferType::DRAM};
     tt_metal::InterleavedBufferConfig output_dram_config{
-        .device = device,
+        .device = dev,
         .size = output_dram_buffer_size,
         .page_size = output_dram_buffer_size,
         .buffer_type = tt_metal::BufferType::DRAM};
 
     auto src0_dram_buffer = CreateBuffer(input_dram_config);
-    uint32_t dram_buffer_src0_addr = src0_dram_buffer->address();
     auto src1_dram_buffer = CreateBuffer(input_dram_config);
-    uint32_t dram_buffer_src1_addr = src1_dram_buffer->address();
     auto dst_dram_buffer = CreateBuffer(output_dram_config);
-    uint32_t dram_buffer_dst_addr = dst_dram_buffer->address();
 
-    uint32_t src0_cb_index = tt::CBIndex::c_0;
-    tt_metal::CircularBufferConfig cb_src0_config =
-        tt_metal::CircularBufferConfig(
-            num_tiles * test_config.input_single_tile_size, {{src0_cb_index, test_config.input_fmt}})
-            .set_page_size(src0_cb_index, test_config.input_single_tile_size);
-    tt_metal::CreateCircularBuffer(program_, core, cb_src0_config);
+    const experimental::DFBSpecName INP0_DFB{"inp0_dfb"};
+    const experimental::DFBSpecName INP1_DFB{"inp1_dfb"};
+    const experimental::DFBSpecName OUT_DFB{"out_dfb"};
+    const experimental::KernelSpecName READER{"reader"};
+    const experimental::KernelSpecName WRITER{"writer"};
+    const experimental::KernelSpecName COMPUTE{"compute"};
 
-    uint32_t src1_cb_index = tt::CBIndex::c_1;
-    tt_metal::CircularBufferConfig cb_src1_config =
-        tt_metal::CircularBufferConfig(
-            num_tiles * test_config.input_single_tile_size, {{src1_cb_index, tt::DataFormat::Float16_b}})
-            .set_page_size(src1_cb_index, test_config.input_single_tile_size);
-    tt_metal::CreateCircularBuffer(program_, core, cb_src1_config);
-
-    uint32_t output_cb_index = tt::CBIndex::c_16;
-    tt_metal::CircularBufferConfig cb_output_config =
-        tt_metal::CircularBufferConfig(
-            num_tiles * test_config.output_single_tile_size, {{output_cb_index, test_config.output_fmt}})
-            .set_page_size(output_cb_index, test_config.output_single_tile_size);
-    tt_metal::CreateCircularBuffer(program_, core, cb_output_config);
-
-    auto reader_kernel = tt_metal::CreateKernel(
-        program_,
-        "tests/tt_metal/tt_metal/test_kernels/dataflow/reader_binary.cpp",
-        core,
-        tt_metal::DataMovementConfig{
-            .processor = tt_metal::DataMovementProcessor::RISCV_1, .noc = tt_metal::NOC::RISCV_1_default});
-
-    auto writer_kernel = tt_metal::CreateKernel(
-        program_,
-        "tt_metal/kernels/dataflow/writer_unary.cpp",
-        core,
-        tt_metal::DataMovementConfig{
-            .processor = tt_metal::DataMovementProcessor::RISCV_0, .noc = tt_metal::NOC::RISCV_0_default});
-
-    vector<uint32_t> compute_kernel_args = {
-        uint(test_config.num_tiles_r),
-        uint(test_config.num_tiles_c),
+    experimental::DataflowBufferSpec inp0_dfb_spec{
+        .unique_id = INP0_DFB,
+        .entry_size = test_config.input_single_tile_size,
+        .num_entries = num_tiles,
+        .data_format_metadata = test_config.input_fmt,
+    };
+    experimental::DataflowBufferSpec inp1_dfb_spec{
+        .unique_id = INP1_DFB,
+        .entry_size = test_config.input_single_tile_size,
+        .num_entries = num_tiles,
+        .data_format_metadata = tt::DataFormat::Float16_b,
+    };
+    experimental::DataflowBufferSpec out_dfb_spec{
+        .unique_id = OUT_DFB,
+        .entry_size = test_config.output_single_tile_size,
+        .num_entries = num_tiles,
+        .data_format_metadata = test_config.output_fmt,
     };
 
-    tt_metal::CreateKernel(
-        program_,
-        "tests/tt_metal/tt_metal/test_kernels/compute/unpack_tilizeA_B.cpp",
-        core,
-        tt_metal::ComputeConfig{
-            .fp32_dest_acc_en = test_config.fp32_dest_acc_en,
-            .dst_full_sync_en = test_config.dst_full_sync_en,
-            .compile_args = compute_kernel_args,
-        });
+    experimental::KernelSpec reader_spec{
+        .unique_id = READER,
+        .source = "tests/tt_metal/tt_metal/test_kernels/dataflow/reader_binary_2_0.cpp",
+        .num_threads = 1,
+        .dfb_bindings = {experimental::ProducerOf(INP0_DFB, "in0"), experimental::ProducerOf(INP1_DFB, "in1")},
+        .runtime_arg_schema =
+            {.runtime_arg_names = {"src0_addr", "src0_bank_id", "src1_addr", "src1_bank_id", "num_tiles"}},
+        .hw_config =
+            experimental::DataMovementHardwareConfig{
+                .gen1_config =
+                    experimental::DataMovementHardwareConfig::Gen1Config{
+                        .processor = tt_metal::DataMovementProcessor::RISCV_1, .noc = tt_metal::NOC::RISCV_1_default},
+                .gen2_config =
+                    experimental::DataMovementHardwareConfig::Gen2Config{
+                        .disable_implicit_sync_for = {INP0_DFB, INP1_DFB}}},
+    };
+
+    experimental::KernelSpec writer_spec{
+        .unique_id = WRITER,
+        .source = "tests/tt_metal/tt_metal/test_kernels/dataflow/writer_unary_2_0.cpp",
+        .num_threads = 1,
+        .dfb_bindings = {experimental::ConsumerOf(OUT_DFB, "in")},
+        .runtime_arg_schema = {.runtime_arg_names = {"dst_addr", "bank_id", "num_tiles"}},
+        .hw_config =
+            experimental::DataMovementHardwareConfig{
+                .gen1_config =
+                    experimental::DataMovementHardwareConfig::Gen1Config{
+                        .processor = tt_metal::DataMovementProcessor::RISCV_0, .noc = tt_metal::NOC::RISCV_0_default},
+                .gen2_config =
+                    experimental::DataMovementHardwareConfig::Gen2Config{.disable_implicit_sync_for = {OUT_DFB}}},
+    };
+
+    experimental::KernelSpec compute_spec{
+        .unique_id = COMPUTE,
+        .source = "tests/tt_metal/tt_metal/test_kernels/compute/unpack_tilizeA_B.cpp",
+        .num_threads = 1,
+        .dfb_bindings =
+            {experimental::ConsumerOf(INP0_DFB, "in0"),
+             experimental::ConsumerOf(INP1_DFB, "in1"),
+             experimental::ProducerOf(OUT_DFB, "out")},
+        .compile_time_args =
+            {{"per_core_block_cnt", test_config.num_tiles_r}, {"per_core_block_tile_cnt", test_config.num_tiles_c}},
+        .hw_config =
+            experimental::ComputeHardwareConfig{
+                .fp32_dest_acc_en = test_config.fp32_dest_acc_en,
+                .dst_full_sync_en = test_config.dst_full_sync_en,
+            },
+    };
+
+    experimental::WorkUnitSpec wu{
+        .name = "main",
+        .kernels = {READER, WRITER, COMPUTE},
+        .target_nodes = node,
+    };
+
+    experimental::ProgramSpec spec{
+        .name = "unpack_tilizeA_B",
+        .kernels = {reader_spec, writer_spec, compute_spec},
+        .dataflow_buffers = {inp0_dfb_spec, inp1_dfb_spec, out_dfb_spec},
+        .work_units = {wu},
+    };
+
+    Program program = experimental::MakeProgramFromSpec(*mesh_device, spec);
+
+    distributed::MeshWorkload workload;
+    auto zero_coord = distributed::MeshCoordinate(0, 0);
+    auto device_range = distributed::MeshCoordinateRange(zero_coord, zero_coord);
+    workload.add_program(device_range, std::move(program));
+    auto& program_ = workload.get_programs().at(device_range);
 
     std::vector<uint32_t> src0_vec = test_config.src0_data.empty()
                                          ? create_arange_vector_of_bfloat16(input_dram_buffer_size, false)
@@ -506,18 +526,26 @@ void run_single_core_unpack_tilizeA_B_program(
     std::vector<uint32_t> src1_vec = create_constant_vector_of_bfloat16(input_dram_buffer_size, 1.0f);
     tt_metal::detail::WriteToBuffer(src1_dram_buffer, src1_vec);
 
-    tt_metal::SetRuntimeArgs(
-        program_,
-        reader_kernel,
-        core,
-        {
-            dram_buffer_src0_addr,
-            (uint32_t)0,
-            dram_buffer_src1_addr,
-            (uint32_t)0,
-            (uint32_t)num_tiles,
-        });
-    tt_metal::SetRuntimeArgs(program_, writer_kernel, core, {dram_buffer_dst_addr, (uint32_t)0, num_tiles});
+    experimental::ProgramRunArgs params;
+    params.kernel_run_args = {
+        experimental::ProgramRunArgs::KernelRunArgs{
+            .kernel = READER,
+            .runtime_arg_values =
+                {{node,
+                  {{"src0_addr", src0_dram_buffer->address()},
+                   {"src0_bank_id", 0u},
+                   {"src1_addr", src1_dram_buffer->address()},
+                   {"src1_bank_id", 0u},
+                   {"num_tiles", num_tiles}}}},
+        },
+        experimental::ProgramRunArgs::KernelRunArgs{
+            .kernel = WRITER,
+            .runtime_arg_values =
+                {{node, {{"dst_addr", dst_dram_buffer->address()}, {"bank_id", 0u}, {"num_tiles", num_tiles}}}},
+        },
+        experimental::ProgramRunArgs::KernelRunArgs{.kernel = COMPUTE},
+    };
+    experimental::SetProgramRunArgs(program_, params);
 
     distributed::EnqueueMeshWorkload(cq, workload, false);
     distributed::Finish(cq);
@@ -648,11 +676,6 @@ TEST_F(LLKMeshDeviceFixture, TensixComputeFastTilize) {
 }
 
 TEST_F(LLKMeshDeviceFixture, TensixComputeUnpackTilizeA_B) {
-    // The Quasar LLK does not implement the `tilizeA_B` family (gated behind
-    // `#ifndef ARCH_QUASAR` in `api/compute/tilize.h`); skip on Quasar.
-    if (MetalContext::instance().get_cluster().arch() == ARCH::QUASAR) {
-        GTEST_SKIP() << "tilizeA_B is not supported on Quasar (no llk_unpack_tilizeA_B in Quasar LLK)";
-    }
     for (bool dst_full_sync_en : {true, false}) {
         unit_tests::compute::tilize::TestConfig test_config = {
             .dst_full_sync_en = dst_full_sync_en,
@@ -1009,6 +1032,21 @@ TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarComputeUnpackTilize) {
                 }
             }
         }
+    }
+}
+
+// Quasar Unpack TilizeA_B (tilize + eltwise binary add)
+TEST_F(QuasarMeshDeviceSingleCardFixture, QuasarComputeUnpackTilizeA_B) {
+    for (bool dst_full_sync_en : {true, false}) {
+        unit_tests::compute::tilize::TestConfig test_config = {
+            .dst_full_sync_en = dst_full_sync_en,
+            .input_single_tile_size = 2 * 1024,
+            .output_single_tile_size = 2 * 1024,
+            .num_tiles_r = 2,
+            .num_tiles_c = 8,
+            .tilize_type = unit_tests::compute::tilize::TilizeType::UNPACK_A_B,
+            .golden_function = ::unit_tests::compute::gold_standard_tilize_w_elwadd};
+        unit_tests::compute::tilize::run_single_core_unpack_tilizeA_B_program(this->devices_.at(0), test_config);
     }
 }
 

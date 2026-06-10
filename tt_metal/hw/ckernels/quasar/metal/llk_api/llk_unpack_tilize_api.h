@@ -5,6 +5,7 @@
 #pragma once
 #include "llk_unpack_common_api.h"
 #include "llk_unpack_tilize.h"
+#include "llk_unpack_tilize_operands.h"
 #include "api/dataflow/dataflow_buffer.h"
 
 /*************************************************************************
@@ -58,3 +59,139 @@ inline void llk_unpack_tilize_block(
         _llk_unpack_tilize_<p_unpacr::UNP_A>(l1_base_idx + t);
     }
 }
+
+/*************************************************************************
+ * LLK UNPACK TILIZE SRC A, UNPACK SRC B
+ *************************************************************************/
+
+/**
+ * Initialize the unpacker for the combined tilize-A / unpack-B operation.
+ *
+ * Operand A and B face geometry (face_r_dim, num_faces) is derived from circular-buffer unpack
+ * metadata (see set_unpack_face_geometry). In debug builds, validates that both unpackers are
+ * configured consistently before programming the init sequence.
+ *
+ * @tparam neginf_srcA      Initialize srcA padding with negative infinity (for reduce-max).
+ * @tparam reload_srcB      Whether srcB is reloaded each iteration.
+ * @tparam zero_srcA        Zero out srcA.
+ * @tparam zero_srcA_reduce Zero out srcA for the reduce path.
+ * @param  operandA         Input operand index for tilize source A.
+ * @param  operandB         Input operand index for unpack source B.
+ * @param  ct_dim           Number of tiles along the column (tilize block width).
+ */
+template <
+    [[maybe_unused]] bool neginf_srcA = false,
+    [[maybe_unused]] std::uint32_t reload_srcB = false,
+    [[maybe_unused]] bool zero_srcA = false,
+    [[maybe_unused]] bool zero_srcA_reduce = false>
+inline void llk_unpack_tilizeA_B_init(
+    const std::uint32_t operandA, const std::uint32_t operandB, const std::uint32_t ct_dim) {
+    const std::uint32_t operandA_id = get_operand_id(operandA);
+    const std::uint32_t operandB_id = get_operand_id(operandB);
+
+    const ckernel::TensorShape tensor_shape_A = get_operand_tensor_shape(operandA_id);
+
+    // LLK_ASSERT_BLOCK(are_unpackers_AB_configured_correctly<UnpackerProgramType::ProgramByFace>(
+    //     unpack_src_format[operandA_id],
+    //     unpack_dst_format[operandA_id],
+    //     unpack_src_format[operandB_id],
+    //     unpack_dst_format[operandB_id],
+    //     unpA_face_r_dim,
+    //     unpB_face_r_dim,
+    //     num_faces,
+    //     get_operand_num_faces(operandB_id)));
+
+    _llk_unpack_tilize_operands_init_<TilizeUnpackerSel::UnpA>(operandA_id, operandB_id, ct_dim, tensor_shape_A);
+}
+
+/**
+ * Unpack and tilize one srcA tile while unpacking the corresponding srcB tile.
+ *
+ * Operand A face geometry and narrow-tile flag are derived from CB unpack metadata; source base
+ * addresses are read from the CB fifo state.
+ *
+ * @tparam neginf_srcA      Initialize srcA padding with negative infinity (for reduce-max).
+ * @tparam reload_srcB      Whether srcB is reloaded each iteration.
+ * @tparam zero_srcA        Zero out srcA.
+ * @tparam zero_srcA_reduce Zero out srcA for the reduce path.
+ * @param  operandA     Input operand index for tilize source A.
+ * @param  operandB     Input operand index for unpack source B.
+ * @param  tile_index_a Tile index within operand A.
+ * @param  tile_index_b Tile index within operand B.
+ * @param  block_ct_dim Number of column tiles in the block.
+ */
+template <
+    [[maybe_unused]] bool neginf_srcA = false,
+    [[maybe_unused]] std::uint32_t reload_srcB = false,
+    [[maybe_unused]] bool zero_srcA = false,
+    [[maybe_unused]] bool zero_srcA_reduce = false>
+inline void llk_unpack_tilizeA_B(
+    const std::uint32_t operandA,
+    const std::uint32_t operandB,
+    const std::uint32_t tile_index_a,
+    const std::uint32_t tile_index_b,
+    [[maybe_unused]] const std::uint32_t block_ct_dim) {
+    const std::uint32_t operandA_id = get_operand_id(operandA);
+    const std::uint32_t operandB_id = get_operand_id(operandB);
+
+    const LocalDFBInterface& local_dfb_interface_a = get_local_dfb_interface(operandA_id);
+    const LocalDFBInterface& local_dfb_interface_b = get_local_dfb_interface(operandB_id);
+
+    const std::uint32_t l1_index_a =
+        local_dfb_interface_a.tc_slots[local_dfb_interface_a.tc_idx].rd_entry_idx + tile_index_a;  // revisit
+    const std::uint32_t l1_index_b =
+        local_dfb_interface_b.tc_slots[local_dfb_interface_b.tc_idx].rd_entry_idx + tile_index_b;
+
+    // LLK_ASSERT_BLOCK(are_unpackers_AB_configured_correctly<UnpackerProgramType::ProgramByFace>(
+    //     unpack_src_format[operandA_id],
+    //     unpack_dst_format[operandA_id],
+    //     unpack_src_format[operandB_id],
+    //     unpack_dst_format[operandB_id],
+    //     face_r_dim,
+    //     get_operand_face_r_dim(operandB_id),
+    //     num_faces,
+    //     get_operand_num_faces(operandB_id)));
+
+    WAYPOINT("UPTW");
+
+    _llk_unpack_tilize_operands_<TilizeUnpackerSel::UnpA>(l1_index_a, l1_index_b);
+
+    WAYPOINT("UPTD");
+}
+
+/**
+ * Unpack and tilize a block of srcA column tiles against srcB by repeatedly calling
+ * llk_unpack_tilizeA_B.
+ *
+ * @tparam neginf_srcA      Initialize srcA padding with negative infinity (for reduce-max).
+ * @tparam reload_srcB      Whether srcB is reloaded each iteration.
+ * @tparam zero_srcA        Zero out srcA.
+ * @tparam zero_srcA_reduce Zero out srcA for the reduce path.
+ * @param  operandA        Input operand index for tilize source A.
+ * @param  operandB        Input operand index for unpack source B.
+ * @param  block_c_tiles_a Number of column tiles in operand A's block.
+ * @param  tile_idx_b      Tile index within operand B.
+ */
+template <
+    [[maybe_unused]] bool neginf_srcA = false,
+    [[maybe_unused]] std::uint32_t reload_srcB = false,
+    [[maybe_unused]] bool zero_srcA = false,
+    [[maybe_unused]] bool zero_srcA_reduce = false>
+inline void llk_unpack_tilizeA_B_block(
+    const std::uint32_t operandA,
+    const std::uint32_t operandB,
+    const std::uint32_t block_c_tiles_a,
+    const std::uint32_t tile_idx_b) {
+    for (std::uint32_t tile_idx_a = 0; tile_idx_a < block_c_tiles_a; tile_idx_a++) {
+        llk_unpack_tilizeA_B<neginf_srcA, reload_srcB, zero_srcA, zero_srcA_reduce>(
+            operandA, operandB, tile_idx_a, tile_idx_b, block_c_tiles_a);
+    }
+}
+
+/**
+ * Tear down the combined tilize-A / unpack-B configuration so a subsequent operation can reprogram
+ * the unpacker. -> No-op for Quasar.
+ *
+ * @param operand Input circular buffer / operand index.
+ */
+inline void llk_unpack_tilizeA_B_uninit([[maybe_unused]] const std::uint32_t operand) {}
