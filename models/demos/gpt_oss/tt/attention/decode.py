@@ -202,7 +202,7 @@ def decode_forward(
         tt_out = ttnn.all_reduce(
             tt_out,
             num_links=ccl_manager.num_links,
-            topology=ccl_manager.topology,
+            topology=ttnn.Topology.Ring,
             cluster_axis=mesh_config.tp_axis,
             memory_config=ttnn.L1_MEMORY_CONFIG,
         )
