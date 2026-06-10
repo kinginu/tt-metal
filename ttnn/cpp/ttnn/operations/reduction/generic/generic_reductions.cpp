@@ -469,17 +469,31 @@ static Tensor std_var_impl(
 
     auto reduce_math = (reduce_type == reduction_common::ReduceType::Std) ? tt::tt_metal::ReduceOpMath::STD
                                                                           : tt::tt_metal::ReduceOpMath::VAR;
+    // Always run the Welford reduction unscaled. Passing a non-unity scalar routes the input
+    // through the kernel's mul_tiles_bcast_scalar (the do_scale path), whose FPU SrcA operand
+    // read truncates fp32 to TF32 (10-bit mantissa) regardless of downstream precision; with a
+    // large input offset the inputs collapse to a constant before the multiply and the variance
+    // is pinned to ~0 (issue #45222). Variance is translation-invariant, so the unscaled
+    // single-pass path is precise. We apply the scalar to the (small-magnitude) result instead:
+    //   var(s*x) = s^2 * var(x)      std(s*x) = |s| * std(x)
     ttnn::Tensor output_tensor = ttnn::prim::welford_reduce(
         input_tensor,
         reduce_math,
         reduce_dim,
-        scalar,
+        /*scalar=*/1.0f,
         memory_config,
         std::nullopt,
         compute_kernel_config,
         correction,
         sub_core_grids,
         reduce_batch_size);
+
+    float post_scale = (reduce_type == reduction_common::ReduceType::Std) ? std::abs(scalar) : scalar * scalar;
+    if (post_scale != 1.0f) {
+        // ttnn::multiply enables fp32_dest_acc_en + UnpackToDestFp32 whenever an operand is fp32,
+        // so this scaling step preserves full fp32 precision (no TF32 SrcA truncation).
+        output_tensor = ttnn::multiply(output_tensor, post_scale, std::nullopt, memory_config);
+    }
 
     if (needs_inverse_permute) {
         output_tensor = ttnn::permute(output_tensor, permute_swap, memory_config);
