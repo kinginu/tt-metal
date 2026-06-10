@@ -1,3 +1,7 @@
+# Two stages back to back: first a tilize datacopy, then a regular unpack A
+# datacopy. Tests that switching from the tilize path back to the standard
+# unpack path works correctly within one fused kernel.
+
 supported_archs: ["wormhole"]
 
 operands:
