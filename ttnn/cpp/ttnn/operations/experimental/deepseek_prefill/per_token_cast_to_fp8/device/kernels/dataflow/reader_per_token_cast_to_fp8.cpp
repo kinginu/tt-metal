@@ -49,7 +49,7 @@ void kernel_main() {
     // Fill the reduce scaler tile: zero, then 1.0 in row 0 of each face (reduce MAX layout).
     cb_scaler_obj.reserve_back(1);
     CoreLocalMem<volatile uint32_t> sc(cb_scaler_obj.get_write_ptr());
-    fill_zeros_async(cb_scaler_obj.get_write_ptr(), get_tile_size(cb_scaler));
+    fill_zeros_async(noc, cb_scaler_obj, get_tile_size(cb_scaler));
     noc.async_read_barrier();
 
     for (uint32_t f = 0; f < num_faces; ++f) {
