@@ -101,8 +101,25 @@ void UnifiedRoutedExpertFfnDeviceOperation::validate_on_program_cache_miss(
         op.local_expert_id,
         t.global_expert_idx_table.logical_shape()[-1]);
 
-    // optional_output: writer kernel computes per-core tile indices from
-    // x.padded_shape[-2]/TILE; a smaller output buffer would overflow.
+    // Direct-write mode: expert_region_offsets present => the writer places
+    // this expert's output into the SHARED optional_output buffer at the
+    // expert's region offset (fusing ttnn::insert). Requires optional_output.
+    const bool direct_write = t.expert_region_offsets.has_value();
+    if (direct_write) {
+        const auto& start = *t.expert_region_offsets;
+        TT_FATAL(start.storage_type() == tt::tt_metal::StorageType::DEVICE, "expert_region_offsets must be on device");
+        TT_FATAL(start.dtype() == tt::tt_metal::DataType::UINT32, "expert_region_offsets must be UINT32");
+        TT_FATAL(is_dram_interleaved(start), "expert_region_offsets must be DRAM-interleaved");
+        TT_FATAL(
+            static_cast<uint32_t>(start.logical_shape()[-1]) <= MAX_GLOBAL_EXPERTS,
+            "expert_region_offsets length ({}) exceeds the maximum supported number of experts ({})",
+            start.logical_shape()[-1],
+            MAX_GLOBAL_EXPERTS);
+        TT_FATAL(
+            t.optional_output.has_value(),
+            "direct-write mode (expert_region_offsets set) requires optional_output (the shared destination buffer)");
+    }
+
     if (t.optional_output.has_value()) {
         const auto& out = *t.optional_output;
         TT_FATAL(out.storage_type() == tt::tt_metal::StorageType::DEVICE, "optional_output must be on device");
@@ -116,14 +133,41 @@ void UnifiedRoutedExpertFfnDeviceOperation::validate_on_program_cache_miss(
             "optional_output rank ({}) must match x rank ({})",
             out_shape.rank(),
             x_shape.rank());
-        for (int i = 0; i < static_cast<int>(out_shape.rank()); ++i) {
+        // The N (emb) dim must always match — the writer tile-row stride is
+        // out_shape[-1]/TILE and must equal x's. In direct-write mode the M
+        // dim is the shared buffer's (>= x's M), tile-aligned, and the writer
+        // bounds destination rows by dst_M_tiles; otherwise it must match x.
+        constexpr uint32_t TILE_H = tt::constants::TILE_HEIGHT;
+        TT_FATAL(
+            out_shape[-1] == x_shape[-1],
+            "optional_output last dim ({}) must match x last dim ({})",
+            out_shape[-1],
+            x_shape[-1]);
+        if (direct_write) {
+            TT_FATAL(out_shape[-2] % TILE_H == 0, "optional_output M ({}) must be tile-aligned", out_shape[-2]);
             TT_FATAL(
-                out_shape[i] == x_shape[i],
-                "optional_output padded_shape[{}] ({}) must match x padded_shape[{}] ({})",
-                i,
-                out_shape[i],
-                i,
-                x_shape[i]);
+                out_shape[-2] >= x_shape[-2],
+                "optional_output M ({}) must be >= x M ({}) in direct-write mode",
+                out_shape[-2],
+                x_shape[-2]);
+            for (int i = 0; i < static_cast<int>(out_shape.rank()) - 2; ++i) {
+                TT_FATAL(
+                    out_shape[i] == x_shape[i],
+                    "optional_output leading dim {} ({}) must match x ({})",
+                    i,
+                    out_shape[i],
+                    x_shape[i]);
+            }
+        } else {
+            for (int i = 0; i < static_cast<int>(out_shape.rank()); ++i) {
+                TT_FATAL(
+                    out_shape[i] == x_shape[i],
+                    "optional_output padded_shape[{}] ({}) must match x padded_shape[{}] ({})",
+                    i,
+                    out_shape[i],
+                    i,
+                    x_shape[i]);
+            }
         }
     }
 }
@@ -166,7 +210,8 @@ ttnn::Tensor unified_routed_expert_ffn(
     uint32_t local_expert_id,
     uint32_t chunk_M_tiles,
     const std::optional<ttnn::DeviceComputeKernelConfig>& compute_kernel_config,
-    const std::optional<ttnn::Tensor>& optional_output) {
+    const std::optional<ttnn::Tensor>& optional_output,
+    const std::optional<ttnn::Tensor>& expert_region_offsets) {
     using OperationType =
         ttnn::operations::experimental::deepseek_prefill::unified_routed_expert_ffn::UnifiedRoutedExpertFfnDeviceOperation;
     return ttnn::device_operation::launch<OperationType>(
@@ -181,7 +226,8 @@ ttnn::Tensor unified_routed_expert_ffn(
             .down_proj = down_proj,
             .counts = counts,
             .global_expert_idx_table = global_expert_idx_table,
-            .optional_output = optional_output});
+            .optional_output = optional_output,
+            .expert_region_offsets = expert_region_offsets});
 }
 
 }  // namespace ttnn::prim
