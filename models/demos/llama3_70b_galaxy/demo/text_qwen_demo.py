@@ -657,9 +657,11 @@ def test_qwen_demo_text(
                 v_cache = ttnn.mul(v_cache, 0, output_tensor=v_cache)
 
         input_tokens_prefill_pt = torch.stack(input_tokens_prefill_pt).view(batch_size, -1)
-        device_sampling_params = SamplingParams(
-            temperature=sampling_params["temperature"], top_k=32, top_p=sampling_params["top_p"]
-        )
+        # On Blackhole the non-greedy on-device sampling kernels (distributed top-k +
+        # scatter_add bincounts) are not supported, so use greedy params (top_k=1, top_p=0,
+        # temperature=1.0). With SAMPLING_AG_CONFIG.allow_force_argmax this routes sampling
+        # through the all-gather + ttnn.argmax path, which is the supported path on BH.
+        device_sampling_params = SamplingParams(temperature=1.0, top_k=1, top_p=0.0)
         if batch_idx == 0:
             logger.info("Starting prefill warmup...")
             profiler.start(f"compile_prefill", iteration=batch_idx)

@@ -319,6 +319,15 @@ class TtQwenModelArgs(TtModelArgs):
         # topology to match the fabric routing. (Using Linear on a ring/torus fabric leaves the
         # cross-axis route unmapped -> IndexError: map::at.)
         self.model_config["CCL_TOPOLOGY"] = ttnn.Topology.Ring
+        # On Blackhole the full non-greedy ttnn.sampling pipeline (distributed top-k +
+        # scatter_add bincounts) is not supported, so route greedy sampling through the
+        # simple all-gather + ttnn.argmax path. Topology follows the 2D-torus fabric (Ring).
+        self.model_config["SAMPLING_AG_CONFIG"] = {
+            "allow_force_argmax": True,
+            "num_links": self.model_config["GALAXY_NUM_LINKS"],
+            "chunks_per_sync": 10,
+            "topology": ttnn.Topology.Ring,
+        }
         if device is not None:
             self.n_local_heads = self.n_heads // self.cluster_shape[1]
 

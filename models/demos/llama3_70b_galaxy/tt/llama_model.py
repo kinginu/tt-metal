@@ -166,6 +166,7 @@ class TtTransformer(LightweightModule):
                 seq_len=int(self.args.max_seq_len),
                 scale_factor=self.args.rope_scaling_factor,
                 start_pos=0,
+                theta=self.args.rope_theta,
             )
         return self.tt_rot_mats_prefill
 

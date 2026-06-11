@@ -318,6 +318,15 @@ class Generator(WarmupForwardMixin):
                 start_pos=[num_cached],
             )
 
+        # Flush device synchronisation state accumulated during phase 2.
+        # The prefix-caching (sp1) traces run chunked SDPA followed by a column
+        # line_all_reduce / all_gather into persistent buffers, which leaves CCL
+        # semaphore / stall-group state behind. Without this decode->prefill cycle
+        # the first real prefill inherits that stale state and produces corrupted
+        # output (mirrors the phase-1 -> phase-2 flush above).
+        self.model.switch_mode("decode")
+        self.model.switch_mode("prefill")
+
         # trace_id_prefill dict check
         logger.info("Prefill warmup completed")
         self.warming_up_prefill = False
@@ -678,8 +687,9 @@ class Generator(WarmupForwardMixin):
 
             sampled_tokens = ttnn.to_torch(ttnn.get_device_tensors(tt_sampled)[0]).to(torch.int32)
 
-            # sampled_tokens has 32 entries ordered by slot.
-            sampled_tensor = sampled_tokens[0, 0, 0, :]  # Shape: [32]
+            # sampled_tokens has 32 entries ordered by slot. The regular sampling kernel
+            # returns [1,1,1,32]; the force-argmax path returns [1,1,32]. Flatten so both work.
+            sampled_tensor = sampled_tokens.reshape(-1)  # Shape: [32]
             output_toks = sampled_tensor[empty_slots]
 
             if tt_log_probs is not None:
@@ -1367,8 +1377,9 @@ class Generator(WarmupForwardMixin):
             ttnn.synchronize_device(self.mesh_device)
             return tt_out[0, 0, :, : self.model.vocab_size].unsqueeze(1), tt_log_probs[0, 0, :, :]
 
-        # If not sharded (it is a sampled token), convert directly from device tensor to torch tensor
-        return tt_out[0, 0, 0, :], tt_log_probs[0, 0, 0, :]
+        # If not sharded (it is a sampled token), convert directly from device tensor to torch tensor.
+        # The regular sampling kernel returns [1,1,1,32]; force-argmax returns [1,1,32]. Flatten so both work.
+        return tt_out.reshape(-1), tt_log_probs.reshape(-1)
 
     def chat_completion(
         self,
