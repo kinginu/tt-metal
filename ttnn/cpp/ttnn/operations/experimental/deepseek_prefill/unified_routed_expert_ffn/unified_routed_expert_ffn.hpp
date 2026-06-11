@@ -61,10 +61,12 @@ ttnn::Tensor unified_routed_expert_ffn(
 
 // MoE-level composite: takes the dispatched buffer + ALL local experts'
 // weights and loops over local experts in C++, calling
-//   extract -> unified_routed_expert_ffn -> insert
-// per expert. NOT a single fused device op across experts (per-expert FFN
-// entries still appear in tt-perf-report); Python sees one call, the device
-// sees N.
+//   extract -> unified_routed_expert_ffn (direct-write)
+// per expert. The FFN writer places each expert's output directly into the
+// shared output buffer at its region offset (the old per-expert ttnn::insert
+// is fused into the FFN writer — no temp buffer, no second DRAM round-trip).
+// NOT a single fused device op across experts (per-expert FFN entries still
+// appear in tt-perf-report); Python sees one call, the device sees N.
 //
 // The unified FFN reads counts on-device so each expert's work scales to its
 // actual count. No host-side counts/idx read, no per-expert Python loop.
