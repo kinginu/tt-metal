@@ -65,12 +65,12 @@ TrayID get_tray_id_for_chip(
         auto bus_id = tt::tt_fabric::get_bus_id(cluster_desc, chip_id);
         log_warning(
             tt::LogAlways,
-            "Unknown motherboard '{}' for chip_id={} (bus_id=0x{:x}) — defaulting tray_id to 0. "
+            "Unknown motherboard '{}' for chip_id={} (bus_id=0x{:x}) — falling back to bus_id as tray_id. "
             "Add this motherboard and its bus IDs to mobo_to_bus_ids in physical_system_discovery.cpp.",
             mobo_name,
             chip_id,
             bus_id);
-        return TrayID{0};
+        return TrayID{static_cast<uint32_t>(bus_id)};
     }
 
     std::vector<uint16_t> ordered_bus_ids = mobo_to_bus_ids.at(mobo_name);
@@ -656,15 +656,11 @@ PhysicalSystemDescriptor run_local_discovery(
 }
 
 PhysicalSystemDescriptor run_local_discovery_live(
+    tt::umd::ClusterDescriptor& cluster_desc,
     const std::shared_ptr<distributed::multihost::DistributedContext>& distributed_context,
     tt::TargetDevice target_device_type,
     bool all_hostnames_unique) {
-    std::unique_ptr<tt::umd::ClusterDescriptor> cdptr = tt::umd::Cluster::create_cluster_descriptor();
-
-    // Live discovery and silicon discovery refresh the descriptor from UMD; other modes keep a stable snapshot of
-    // the caller-provided descriptor.
-    auto& cluster_desc_ref = *cdptr;
-    return run_local_discovery(cluster_desc_ref, distributed_context, target_device_type, all_hostnames_unique);
+    return run_local_discovery(cluster_desc, distributed_context, target_device_type, all_hostnames_unique);
 }
 
 }  // namespace discovery_impl
@@ -691,7 +687,8 @@ PhysicalSystemDescriptor run_physical_system_discovery(
 
     PhysicalSystemDescriptor psd =
         dispatch_live
-            ? discovery_impl::run_local_discovery_live(distributed_context, target_device_type, all_hostnames_unique)
+            ? discovery_impl::run_local_discovery_live(
+                  cluster_desc, distributed_context, target_device_type, all_hostnames_unique)
             : discovery_impl::run_local_discovery(
                   cluster_desc, distributed_context, target_device_type, all_hostnames_unique);
 
