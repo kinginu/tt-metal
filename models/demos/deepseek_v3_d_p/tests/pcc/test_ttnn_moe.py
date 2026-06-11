@@ -76,6 +76,7 @@ def run_model(
     num_links,
     topology,
     gate_fallback_mode,
+    use_fp8_compression,
     request,
 ):
     """TtMoe PCC body — shared between `test_ds_moe` / `test_kimi_moe`.
@@ -84,6 +85,12 @@ def run_model(
     the variant's HF config. DSv3 values are a no-op; Kimi values switch the
     gate routing rule.
     """
+    # FP8 compression compresses only works on Blackhole
+    if use_fp8_compression and not is_blackhole():
+        pytest.skip("use_fp8_compression requires Blackhole (per_token_cast_to_fp8/back)")
+    # The fp8 compression path is not yet perf-optimized (Issue #46742)
+    if use_fp8_compression and not run_pcc_check:
+        pytest.skip("fp8 compression path is PCC-only for now (no perf path)")
 
     # Scoped: only the linear-8 / 64-expert / HOST_ALL / pcc-check case OOMs without this.
     # Cached all-gather semaphores get placed at the wrong offset for that specific config.
@@ -292,6 +299,7 @@ def run_model(
         n_expert_groups=config.n_group,
         n_limited_groups=config.topk_group,
         route_scale=config.routed_scaling_factor,
+        use_fp8_compression=use_fp8_compression,
     )
     ttnn.synchronize_device(mesh_device)
     profiler.end("tt_moe_creation")
@@ -613,6 +621,7 @@ def run_model(
     ],
     indirect=["mesh_device", "device_params"],
 )
+@pytest.mark.parametrize("use_fp8_compression", [False, True], ids=["bf16", "fp8"])
 @pytest.mark.parametrize("variant", ["deepseek_v3_d_p"], indirect=True, ids=["deepseek_v3"])
 def test_ds_moe(
     variant,
@@ -629,6 +638,7 @@ def test_ds_moe(
     num_links,
     topology,
     gate_fallback_mode,
+    use_fp8_compression,
     request,
 ):
     run_model(
@@ -646,6 +656,7 @@ def test_ds_moe(
         num_links,
         topology,
         gate_fallback_mode,
+        use_fp8_compression,
         request,
     )
 
@@ -679,6 +690,7 @@ def test_ds_moe(
     ],
     indirect=["mesh_device", "device_params"],
 )
+@pytest.mark.parametrize("use_fp8_compression", [False, True], ids=["bf16", "fp8"])
 @pytest.mark.parametrize("variant", ["kimi_k2_6"], indirect=True, ids=["kimi"])
 def test_kimi_moe(
     variant,
@@ -695,6 +707,7 @@ def test_kimi_moe(
     num_links,
     topology,
     gate_fallback_mode,
+    use_fp8_compression,
     request,
 ):
     run_model(
@@ -712,5 +725,6 @@ def test_kimi_moe(
         num_links,
         topology,
         gate_fallback_mode,
+        use_fp8_compression,
         request,
     )
