@@ -258,7 +258,7 @@ inline void calculate_typecast_fp32_to_fp16b() {
 
 template <bool APPROXIMATION_MODE, int ITERATIONS>
 inline void calculate_typecast_uint16_to_fp32() {
-    // TODO: Attempt to use LOADMACRO
+    // TODO: Attempt to use LOADMACRO #46751
 #pragma GCC unroll 0
     for (int d = 0; d < ITERATIONS; d++) {
         TTI_SFPLOAD(p_sfpu::LREG0, InstrModLoadStore::INT32, ADDR_MOD_7, 0);
@@ -326,7 +326,7 @@ inline void calculate_typecast_int32_to_fp32() {
 
 template <bool APPROXIMATION_MODE, int ITERATIONS>
 inline void calculate_typecast_uint32_to_fp16b() {
-    // TODO: Attempt to use LOADMACRO
+    // TODO: Attempt to use LOADMACRO #46751
 #pragma GCC unroll 0
     for (int d = 0; d < ITERATIONS; d++) {
         TTI_SFPLOAD(p_sfpu::LREG0, InstrModLoadStore::INT32, ADDR_MOD_7, 0);
@@ -396,7 +396,7 @@ inline void calculate_typecast_uint32_to_fp32() {
 
 template <bool APPROXIMATION_MODE, int ITERATIONS>
 inline void calculate_typecast_uint16_to_uint32() {
-    // TODO: Attempt to use LOADMACRO
+    // TODO: Attempt to use LOADMACRO #46751
 #pragma GCC unroll 8
     for (int d = 0; d < ITERATIONS; d++) {
         TTI_SFPLOAD(p_sfpu::LREG0, InstrModLoadStore::INT32, ADDR_MOD_7, 0);
@@ -407,15 +407,15 @@ inline void calculate_typecast_uint16_to_uint32() {
 
 template <bool APPROXIMATION_MODE, int ITERATIONS>
 inline void calculate_typecast_uint32_to_uint16() {
-    // TODO: Attempt to use LOADMACRO
+    // TODO: Attempt to use LOADMACRO #46751
 #pragma GCC unroll 8
     for (int d = 0; d < ITERATIONS; d++) {
         TTI_SFPLOAD(p_sfpu::LREG0, InstrModLoadStore::INT32, ADDR_MOD_7, 0);
         TTI_SFPMOV(0, p_sfpu::LREG0, p_sfpu::LREG1, 0);
         TTI_SFPSHFT((-16) & 0xFFF, 0, p_sfpu::LREG0, 1);
         TTI_SFPGT(0, p_sfpu::LCONST_0, p_sfpu::LREG0, 8);  // Set LREG0 = -1 if greater than 0
-        TTI_SFPOR(0, p_sfpu::LREG0, p_sfpu::LREG1, 0);  // Leaves garbage in high bits, but packer will ignore it
-        TTI_SFPSTORE(p_sfpu::LREG1, 9, ADDR_MOD_6, 0);  // Swap hi and low 16 before write
+        TTI_SFPOR(0, p_sfpu::LREG0, p_sfpu::LREG1, 0);     // Leaves garbage in high bits, but packer will ignore it
+        TTI_SFPSTORE(p_sfpu::LREG1, 9, ADDR_MOD_6, 0);     // Swap hi and low 16 before write
     }
 }
 
