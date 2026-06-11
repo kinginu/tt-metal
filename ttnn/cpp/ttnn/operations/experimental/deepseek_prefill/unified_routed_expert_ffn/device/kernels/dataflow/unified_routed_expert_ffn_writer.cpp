@@ -26,6 +26,7 @@
 #include <cstdint>
 
 #include "api/dataflow/dataflow_api.h"
+#include "api/debug/assert.h"
 
 constexpr uint32_t TILE_HEIGHT = 32;
 
@@ -122,7 +123,8 @@ void kernel_main() {
                         // destination tile-row adds the per-expert region
                         // offset (0 in non-direct mode).
                         const uint32_t dst_row = row_offset_tiles + row;
-                        // Bounds:
+                        // Bounds that decide whether this is a real output tile
+                        // for this expert:
                         //   * col < N_down_tiles_full: GRID_X=11 ceil_div
                         //     produces phantom output cols past actual N.
                         //   * row < M_tiles_full: ceil_div of M produces a
@@ -131,12 +133,21 @@ void kernel_main() {
                         //   * row < count_tiles: the last chunk's per_core_M
                         //     rows extend past count_tiles when count_tiles
                         //     is not chunk-aligned.
-                        //   * dst_row < dst_M_tiles: destination must stay
-                        //     inside the (possibly shared) output buffer.
-                        if (col < N_down_tiles_full && row < M_tiles_full && row < count_tiles &&
-                            dst_row < dst_M_tiles) {
-                            const uint32_t tile_idx = dst_row * N_down_tiles_full + col;
-                            noc_async_write_page(tile_idx, out_acc, l1_read);
+                        if (col < N_down_tiles_full && row < M_tiles_full && row < count_tiles) {
+                            // The destination tile-row must stay inside the
+                            // (possibly shared) output buffer. ttnn::insert
+                            // asserted the whole-slice fit
+                            // (start_tile_idx + num_tiles <= global_num_tiles);
+                            // assert the per-tile equivalent so an over-capacity
+                            // region offset fails loudly in watcher builds. The
+                            // guard below keeps Release builds safe (skip the OOB
+                            // write rather than corrupt DRAM, since ASSERT is a
+                            // no-op there).
+                            ASSERT(dst_row < dst_M_tiles);
+                            if (dst_row < dst_M_tiles) {
+                                const uint32_t tile_idx = dst_row * N_down_tiles_full + col;
+                                noc_async_write_page(tile_idx, out_acc, l1_read);
+                            }
                         }
                         l1_read += out_tile_bytes;
                     }
