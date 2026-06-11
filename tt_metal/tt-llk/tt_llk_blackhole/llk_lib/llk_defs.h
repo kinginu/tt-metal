@@ -224,7 +224,9 @@ constexpr InstrModLoadStore GetSfpLoadStoreInstrMod()
         case DataFormat::Float32:
             return InstrModLoadStore::FP32; // spec value 3: fp32 format
         case DataFormat::Float16:
-            return InstrModLoadStore::FP16A; // spec value 1: fp16_a format
+            // With 32-bit (fp32) dest accumulation the datum is stored as full fp32 in the dest word, so
+            // SFPLOAD/SFPSTORE must use FP32 access; otherwise the narrow fp16_a format applies.
+            return is_fp32_dest_acc_en ? InstrModLoadStore::FP32 : InstrModLoadStore::FP16A; // spec value 1: fp16_a format
         case DataFormat::Bfp8:
             return InstrModLoadStore::DEFAULT; // spec value 0: default format
         case DataFormat::Bfp4:
@@ -232,7 +234,9 @@ constexpr InstrModLoadStore GetSfpLoadStoreInstrMod()
         case DataFormat::Bfp2:
             return InstrModLoadStore::DEFAULT; // spec value 0: default format
         case DataFormat::Float16_b:
-            return InstrModLoadStore::FP16B; // spec value 2: bfloat/fp16_b
+            // With 32-bit (fp32) dest accumulation the datum is stored as full fp32 in the dest word, so
+            // SFPLOAD/SFPSTORE must use FP32 access; otherwise the narrow fp16_b format applies.
+            return is_fp32_dest_acc_en ? InstrModLoadStore::FP32 : InstrModLoadStore::FP16B; // spec value 2: bfloat/fp16_b
         case DataFormat::Bfp8_b:
             return InstrModLoadStore::DEFAULT; // spec value 0: default format
         case DataFormat::Bfp4_b:
