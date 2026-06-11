@@ -590,6 +590,18 @@ public:
         return ncrisc_noc_read_with_transaction_id_flushed(noc_id_, trid);
     }
 
+    /**
+     * @brief Writes the sticky NOC_PACKET_TAG register so that subsequent untagged reads on this Noc
+     *        inherit `trid` for per-trid accounting.
+     *
+     * Use when a loop mixes several read helpers and you want to tag the batch without threading
+     * NocOptions::TXN_ID through every callee. Pair with async_read_barrier<NocOptions::TXN_ID> to
+     * wait on just this batch. Pass trid=0 to clear (untagged reads = no per-trid accounting).
+     *
+     * @param trid Transaction ID to set; 0 clears the tag.
+     */
+    void set_read_trid(uint32_t trid) const { noc_async_read_set_trid(trid, noc_id_); }
+
     /** @brief Waits for all outstanding read transactions to complete.
      *
      * This blocking call waits for all the outstanding enqueued read transactions

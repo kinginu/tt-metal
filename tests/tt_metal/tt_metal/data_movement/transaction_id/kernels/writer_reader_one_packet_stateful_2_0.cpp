@@ -7,13 +7,12 @@
 
 // L1 to L1 send (one packet, stateful + transaction-ID).
 //
-// NOTE: This kernel intentionally stays on the legacy NOC free functions
-// because the new Noc/UnicastEndpoint API does not yet expose a combined
-// "with_state + with_trid" form. The new API provides:
-//   - stateful only:        set_async_write_state + async_write_with_state
-//   - transaction-id only:  async_write<TxnIdMode::ENABLED>
-// but not the union of the two that this test exercises. Once the new API
-// surface adds a stateful+trid combined call, migrate this kernel to it.
+// NOTE: This kernel intentionally stays on the legacy NOC free functions because the new
+// Noc/UnicastEndpoint API does not expose a stateful+trid write: set_async_write_state and
+// async_write_with_state both static_assert against NocOptions::TXN_ID (no underlying 1.0
+// primitive exists), and async_writes_flushed<NocOptions::TXN_ID> exists but is reached only
+// from a non-stateful async_write<NocOptions::TXN_ID>. Migrate once the API exposes
+// stateful+trid writes (tracked alongside #31405).
 void kernel_main() {
     constexpr uint32_t l1_local_addr = get_arg(args::l1_addr);
     constexpr uint32_t test_id = get_arg(args::test_id);
