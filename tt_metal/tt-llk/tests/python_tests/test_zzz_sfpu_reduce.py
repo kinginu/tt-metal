@@ -159,10 +159,10 @@ def is_valid_reduce_dimension(mathop, dest_acc, formats, dim):
 
 
 @parametrize(
-    formats=lambda reduce_pool: get_reduce_formats(reduce_pool),
-    mathop=lambda reduce_pool: get_supported_reduce_axioms(reduce_pool),
+    formats=get_reduce_formats,
+    mathop=get_supported_reduce_axioms,
     dest_acc=[DestAccumulation.No, DestAccumulation.Yes],
-    input_bounds=lambda formats: get_format_input_bounds(formats),
+    input_bounds=get_format_input_bounds,
     reduce_pool=[ReducePool.Min, ReducePool.Max, ReducePool.Sum, ReducePool.Average],
     dimension_combinations=lambda mathop, dest_acc, formats: [
         dim
