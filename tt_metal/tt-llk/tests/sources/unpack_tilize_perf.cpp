@@ -139,7 +139,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
 
         else if constexpr (PERF_RUN_TYPE == PerfRunType::UNPACK_ISOLATE || PERF_RUN_TYPE == PerfRunType::L1_CONGESTION)
         {
-            const std::uint32_t NUM_DVALIDS = _llk_unpack_tilize_num_dvalids_wrapper_(TILE_CNT, TILE_NUM_FACES);
+            const std::uint32_t NUM_DVALIDS = _llk_unpack_tilize_num_dvalids_wrapper_(formats.unpack_A_src, TILE_CNT, TILE_NUM_FACES);
             if constexpr (!unpack_to_dest)
             {
                 _perf_math_loop_clear_valid<true, true>(LOOP_FACTOR * NUM_DVALIDS);
