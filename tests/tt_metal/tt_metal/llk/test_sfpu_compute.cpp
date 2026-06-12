@@ -82,51 +82,51 @@ const map<std::string, std::map<std::string, std::string>> sfpu_binary_op_to_op_
     {"div_binary", {{"SFPU_OP_CHAIN_0", "div_binary_tile_init(); div_binary_tile(0, 1, 2);"}}},
 };
 
-bfloat16 sfpu_function(const std::string& op_name, const bfloat16& input) {
+// Scalar golden for the unary SFPU ops, computed in float. Both the bf16 and
+// the Float32 paths share this: bf16 wraps the result in bfloat16,
+// Float32 consumes it directly. Keeping the math in one place is what lets the
+// two data-format paths stay in sync.
+float sfpu_function(const std::string& op_name, float input) {
     if (op_name == "relu") {
-        return bfloat16(fmaxf(static_cast<float>(input), 0.0f));
+        return fmaxf(input, 0.0f);
     }
     if (op_name == "exponential") {
-        return bfloat16(std::exp(static_cast<float>(input)));
+        return std::exp(input);
     }
     if (op_name == "reciprocal") {
-        return bfloat16(1 / static_cast<float>(input));
+        return 1 / input;
     }
     if (op_name == "gelu") {
         static constexpr float alpha = M_2_SQRTPI * M_SQRT1_2;
-        auto x = static_cast<float>(input);
-        auto x3 = x * x * x;
-        float result = x * 0.5 * (1.0 + tanhf(alpha * (x + 0.044715 * x3)));
-        return bfloat16(result);
+        auto x3 = input * input * input;
+        return input * 0.5 * (1.0 + tanhf(alpha * (input + 0.044715 * x3)));
     }
     if (op_name == "sqrt") {
-        return bfloat16(sqrtf(static_cast<float>(input)));
+        return sqrtf(input);
     }
     if (op_name == "sigmoid") {
-        auto x = static_cast<float>(input);
-        float result = 1 / (1 + std::exp(-x));
-        return bfloat16(result);
+        return 1 / (1 + std::exp(-input));
     }
     if (op_name == "silu") {
-        auto x = static_cast<float>(input);
-        float result = x / (1 + std::exp(-x));
-        return bfloat16(result);
+        return input / (1 + std::exp(-input));
     }
     if (op_name == "log") {
-        return bfloat16(logf(static_cast<float>(input)));
+        return logf(input);
     }
     if (op_name == "tanh") {
-        return bfloat16(std::tanh(static_cast<float>(input)));
+        return std::tanh(input);
     }
     if (op_name == "rsqrt") {
-        return bfloat16(1.0f / sqrtf(static_cast<float>(input)));
+        return 1.0f / sqrtf(input);
     }
     if (op_name == "sign") {
-        float val = static_cast<float>(input);
-        float result = static_cast<float>((val > 0.0f) - (val < 0.0f));
-        return bfloat16(result);
+        return static_cast<float>((input > 0.0f) - (input < 0.0f));
     }
     TT_THROW("Unsupported op_name in test");
+}
+
+bfloat16 sfpu_function(const std::string& op_name, const bfloat16& input) {
+    return bfloat16(sfpu_function(op_name, static_cast<float>(input)));
 }
 
 // Reference implementation for binary SFPU ops.
@@ -177,63 +177,48 @@ std::pair<vector<uint32_t>, vector<uint32_t>> generate_packed_sfpu_binary_inputs
     TT_THROW("Unsupported binary op_name in test");
 }
 
-bool is_close_packed_sfpu_output(
-    const std::vector<uint32_t>& vec_a, const std::vector<uint32_t>& vec_b, const std::string& op_name) {
+// Per-op (rtol, atol) for the device-vs-golden comparison. Shared by the bf16
+// and Float32 close-checks so the tolerances live in one place. Defaults match
+// is_close()'s own defaults for the "everything else" bucket.
+std::pair<float, float> sfpu_tolerance(const std::string& op_name) {
     if (op_name == "tanh") {
-        return is_close_packed_vectors<bfloat16, uint32_t>(
-            vec_a, vec_b, [&](const bfloat16& a, const bfloat16& b) { return is_close(a, b, 0.175f, 0.1f); });
+        return {0.175f, 0.1f};
     }
     if ((op_name == "gelu") or (op_name == "relu")) {
-        return is_close_packed_vectors<bfloat16, uint32_t>(
-            vec_a, vec_b, [&](const bfloat16& a, const bfloat16& b) { return is_close(a, b, 0.15f); });
+        return {0.15f, 0.001f};
     }
-    if ((op_name == "exponential")) {
-        return is_close_packed_vectors<bfloat16, uint32_t>(
-            vec_a, vec_b, [&](const bfloat16& a, const bfloat16& b) { return is_close(a, b, 0.1f, 0.1f); });
+    if (op_name == "exponential") {
+        return {0.1f, 0.1f};
     }
-    if ((op_name == "log")) {
-        return is_close_packed_vectors<bfloat16, uint32_t>(
-            vec_a, vec_b, [&](const bfloat16& a, const bfloat16& b) { return is_close(a, b, 0.03f, 0.02f); });
+    if (op_name == "log") {
+        return {0.03f, 0.02f};
     }
+    return {0.06f, 0.006f};
+}
+
+bool is_close_packed_sfpu_output(
+    const std::vector<uint32_t>& vec_a, const std::vector<uint32_t>& vec_b, const std::string& op_name) {
+    const auto [rtol, atol] = sfpu_tolerance(op_name);
     return is_close_packed_vectors<bfloat16, uint32_t>(
-        vec_a, vec_b, [&](const bfloat16& a, const bfloat16& b) { return is_close(a, b, 0.06f, 0.006f); });
+        vec_a, vec_b, [&](const bfloat16& a, const bfloat16& b) { return is_close(a, b, rtol, atol); });
 }
 
-float sfpu_function_f32(const std::string& op_name, float input) {
-    if (op_name == "relu") {
-        return fmaxf(input, 0.0f);
-    }
-    TT_THROW("Unsupported op_name in test (Float32 path supports relu only in v1)");
-}
-
-// Float32 has 1:1 element-to-word packing, so the bf16-oriented pack_vector/unpack_vector
-// templates (which assume sub-word packing) don't instantiate here. Use std::bit_cast loops
+// Float32 close-check. Shares sfpu_function() / sfpu_tolerance() / the
+// uniform-random input generator with the bf16 path; only this comparison stays
+// separate because Float32 has 1:1 element-to-word packing and unpack_vector
+// requires sizeof(PackType) > sizeof(ValueType), so the bf16-oriented
+// is_close_packed_vectors helper won't instantiate. bit_cast per element
 // instead, matching test_transpose.cpp:404-410.
-std::vector<uint32_t> generate_packed_sfpu_input_f32(unsigned int numel, const std::string& op_name, int seed) {
-    if (op_name != "relu") {
-        TT_THROW("Unsupported op_name in test (Float32 path supports relu only in v1)");
-    }
-    std::vector<uint32_t> packed(numel);
-    std::mt19937 rng(static_cast<uint32_t>(seed));
-    std::uniform_real_distribution<float> dist(-1.0f, 1.0f);
-    for (auto& w : packed) {
-        w = std::bit_cast<uint32_t>(dist(rng));
-    }
-    return packed;
-}
-
 bool is_close_packed_sfpu_output_f32(
     const std::vector<uint32_t>& vec_a, const std::vector<uint32_t>& vec_b, const std::string& op_name) {
-    if (op_name != "relu") {
-        TT_THROW("Unsupported op_name in test (Float32 path supports relu only in v1)");
-    }
     if (vec_a.size() != vec_b.size()) {
         return false;
     }
+    const auto [rtol, atol] = sfpu_tolerance(op_name);
     for (size_t i = 0; i < vec_a.size(); ++i) {
         const float a = std::bit_cast<float>(vec_a[i]);
         const float b = std::bit_cast<float>(vec_b[i]);
-        if (!is_close(a, b, 0.06f, 0.006f)) {
+        if (!is_close(a, b, rtol, atol)) {
             return false;
         }
     }
@@ -277,11 +262,16 @@ bool run_sfpu_all_same_buffer(
 
     // Input
     const bool is_fp32 = (test_config.l1_input_data_format == tt::DataFormat::Float32);
+    // The Float32 device path only wires up relu in v1; the golden/input/check helpers below are
+    // format-generic, so this is the single place that pins the supported-op set for Float32.
+    TT_FATAL(!is_fp32 || test_config.sfpu_op == "relu", "Float32 SFPU path supports relu only in v1");
     const size_t element_size = is_fp32 ? sizeof(float) : sizeof(bfloat16);
     const size_t numel = byte_size / element_size;
     const auto seed = std::chrono::system_clock::now().time_since_epoch().count();
+    // Float32 packs 1:1 into uint32 words (pack_vector accepts sizeof(PackType) >= sizeof(ValueType)),
+    // so the bf16 uniform-random generator works for both; relu uses the [-1, 1] default range.
     std::vector<uint32_t> packed_input =
-        is_fp32 ? sfpu_util::generate_packed_sfpu_input_f32(numel, test_config.sfpu_op, seed)
+        is_fp32 ? generate_packed_uniform_random_vector<uint32_t, float>(-1.0f, 1.0f, numel, seed)
                 : sfpu_util::generate_packed_sfpu_input(numel, test_config.sfpu_op, seed);
 
     // Golden output
@@ -291,7 +281,7 @@ bool run_sfpu_all_same_buffer(
         packed_golden.resize(packed_input.size());
         for (size_t i = 0; i < packed_input.size(); ++i) {
             const float in = std::bit_cast<float>(packed_input[i]);
-            packed_golden[i] = std::bit_cast<uint32_t>(sfpu_util::sfpu_function_f32(test_config.sfpu_op, in));
+            packed_golden[i] = std::bit_cast<uint32_t>(sfpu_util::sfpu_function(test_config.sfpu_op, in));
         }
     } else {
         auto input = unpack_vector<bfloat16, uint32_t>(packed_input);
