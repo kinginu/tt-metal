@@ -125,7 +125,7 @@ inline void llk_unpack_A(const std::uint32_t operand, const std::uint32_t tile_i
     const std::uint32_t l1_tile_idx =
         local_dfb_interface.tc_slots[local_dfb_interface.tc_idx].rd_entry_idx + tile_index;
     if constexpr (BType == BroadcastType::NONE) {
-        _llk_unpack_unary_operand_<p_unpacr::UNP_A, binary_reuse_dest, unpack_to_dest>(
+        _llk_unpack_unary_operand_<p_unpacr::UNP_A, binary_reuse_dest, unpack_to_dest, DST_SYNC_MODE>(
             l1_tile_idx, operand_id /*buf_desc_id*/);
     } else {
         constexpr std::uint32_t unp_sel = unpack_to_dest ? p_unpacr::UNP_A : p_unpacr::UNP_B;
@@ -159,7 +159,7 @@ inline void llk_unpack_A_block(
     for (uint32_t tile_index = start_tile_index; tile_index < start_tile_index + ntiles; tile_index++) {
         WAYPOINT("UPAW");
         if constexpr (BType == BroadcastType::NONE) {
-            _llk_unpack_unary_operand_<p_unpacr::UNP_A, binary_reuse_dest, unpack_to_dest>(
+            _llk_unpack_unary_operand_<p_unpacr::UNP_A, binary_reuse_dest, unpack_to_dest, DST_SYNC_MODE>(
                 rd_entry_idx + tile_index, operand_id /*buf_desc_id*/);
         } else {
             constexpr std::uint32_t unp_sel = unpack_to_dest ? p_unpacr::UNP_A : p_unpacr::UNP_B;

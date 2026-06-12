@@ -192,6 +192,14 @@ inline void _llk_unpack_unary_operand_init_(
         const std::uint32_t bd_format = ckernel::trisc::bd_table[buf_desc_id].f.format;
         if (bd_format == (std::uint32_t)DataFormat::Float32 || bd_format == (std::uint32_t)DataFormat::Int32)
         {
+            // Unpack owns the DEST section base in the unpack-to-dest path: it is the DEST
+            // producer (UNP_DEST), so it programs the per-TRISC section base itself rather than
+            // letting the math middleman set it on its behalf
+            // Establish the initial bank-0 base here; the per-tile call flips
+            // it in SyncHalf. unpack::TRISC_ID == 0 selects the same SEC slot the UNP_DEST client reads.
+            ckernel::trisc::_reset_dest_register_offset_();
+            ckernel::trisc::_set_dest_section_base_<ckernel::unpack::TRISC_ID>(ckernel::trisc::_get_dest_buffer_base_());
+
             cfg_rmw(THCON_UNPACKER0_REG0_TRANSPOSE_RMW, 0 /*TRANSPOSE_EN forced false for UNP_DEST*/);
             _llk_unpack_unary_operand_mop_config_<p_unpacr::UNP_DEST, IS_32b_DEST_EN>(buf_desc_id, num_tiles);
             return;
@@ -228,7 +236,11 @@ inline void _llk_unpack_unary_operand_init_(
  * @tparam reuse_dest: When not NONE, sets source counter for the CB unpacker only
  * @param l1_tile_idx: Index into the L1 buffer for a tile
  */
-template <std::uint32_t UNP_SEL, EltwiseBinaryReuseDestType reuse_dest = EltwiseBinaryReuseDestType::NONE, bool unpack_to_dest = false>
+template <
+    std::uint32_t UNP_SEL,
+    EltwiseBinaryReuseDestType reuse_dest = EltwiseBinaryReuseDestType::NONE,
+    bool unpack_to_dest                   = false,
+    ckernel::DstSync DEST_SYNC_MODE       = ckernel::DstSync::SyncFull>
 inline void _llk_unpack_unary_operand_(const std::uint32_t l1_tile_idx, const std::uint32_t buf_desc_id = 0)
 {
     // When unpack-to-dest is active for a 32-bit operand, unpack is the producer on UNPACK_MATH
@@ -254,6 +266,12 @@ inline void _llk_unpack_unary_operand_(const std::uint32_t l1_tile_idx, const st
             // Drain UNPACK0 before posting "filled" so the post does not race the writes math reads.
             ckernel::ckernel_template::run_bank0_sw_cntl(instrn_buffer);
             _llk_sync_post_<p_stall::UNPACK0>(semaphore::UNPACK_MATH);
+
+            // Unpack owns the DEST section base, so it flips to the other bank for the next iteration
+            if constexpr (DEST_SYNC_MODE == ckernel::DstSync::SyncHalf)
+            {
+                _llk_sync_advance_dest_section_<ckernel::unpack::TRISC_ID, true /*EN_32BIT_DEST*/, p_stall::UNPACK0>();
+            }
             return;
         }
     }

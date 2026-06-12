@@ -173,7 +173,7 @@ inline void _set_dst_write_addr_(const std::uint32_t tile_index)
     const std::uint32_t tile_shape_idx =
         (TILE_SHAPE == ckernel::trisc::DstTileShape::Tile32x32) ? 6 : ((TILE_SHAPE == ckernel::trisc::DstTileShape::Tile32x16) ? 5 : 4);
     const std::uint32_t dst_index = (tile_index << tile_shape_idx) + ckernel::trisc::_get_dest_buffer_base_();
-    ckernel::trisc::_set_dest_section_base_<DEST_SECTION_BASE_IDX>(dst_index);
+    ckernel::trisc::_set_dest_section_base_<TRISC_ID>(dst_index);
 }
 
 inline void _set_dst_write_addr_by_rows_(const std::uint32_t num_rows_per_tile, const std::uint32_t tile_index)
@@ -183,7 +183,7 @@ inline void _set_dst_write_addr_by_rows_(const std::uint32_t num_rows_per_tile, 
             ? 6
             : ((num_rows_per_tile == 32) ? 5 : ((num_rows_per_tile == 16) ? 4 : ((num_rows_per_tile == 8) ? 3 : ((num_rows_per_tile == 4) ? 2 : 1))));
     const std::uint32_t dst_index = (tile_index << tile_shape_idx) + ckernel::trisc::_get_dest_buffer_base_();
-    ckernel::trisc::_set_dest_section_base_<DEST_SECTION_BASE_IDX>(dst_index);
+    ckernel::trisc::_set_dest_section_base_<TRISC_ID>(dst_index);
 }
 
 inline void move_d2a_fixed_face(const std::uint8_t addrmod)
