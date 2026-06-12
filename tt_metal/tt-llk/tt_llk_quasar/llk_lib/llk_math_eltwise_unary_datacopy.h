@@ -119,8 +119,8 @@ inline void _llk_math_eltwise_unary_datacopy_init_(
     // math reads the operand's L1 format from it (operand_id == buf_desc_id by convention).
     if constexpr (unpack_to_dest)
     {
-        const std::uint32_t bd_format = bd_table[buf_desc_id].f.format;
-        if (bd_format == (std::uint32_t)DataFormat::Float32 || bd_format == (std::uint32_t)DataFormat::Int32)
+        const auto bd_format = static_cast<DataFormat>(bd_table[buf_desc_id].f.format);
+        if (bd_format == DataFormat::Float32 || bd_format == DataFormat::Int32)
         {
             return;
         }
@@ -168,8 +168,8 @@ inline void _llk_math_eltwise_unary_datacopy_(const std::uint32_t num_rows_per_t
     // table (operand_id == buf_desc_id by convention) rather than threaded as a value.
     if constexpr (unpack_to_dest)
     {
-        const std::uint32_t bd_format = bd_table[buf_desc_id].f.format;
-        if (bd_format == (std::uint32_t)DataFormat::Float32 || bd_format == (std::uint32_t)DataFormat::Int32)
+        const auto bd_format = static_cast<DataFormat>(bd_table[buf_desc_id].f.format);
+        if (bd_format == DataFormat::Float32 || bd_format == DataFormat::Int32)
         {
             return;
         }

@@ -13,12 +13,12 @@
  * LLK PACK COMMON
  *************************************************************************/
 
-inline bool llk_pack_is_unpack_to_dest_32b(const std::uint32_t output_id) {
+constexpr bool llk_pack_is_unpack_to_dest_32b(const std::uint32_t output_id) {
     const DataFormat pack_reg_format = static_cast<DataFormat>(pack_src_format[output_id]);
     return pack_reg_format == DataFormat::Float32 || pack_reg_format == DataFormat::Int32;
 }
 
-inline bool llk_pack_has_unpack_to_dest_32b() {
+constexpr bool llk_pack_has_unpack_to_dest_32b() {
     for (std::uint32_t output_id = 0; output_id < NUM_CIRCULAR_BUFFERS; ++output_id) {
         if (static_cast<DataFormat>(pack_dst_format[output_id]) != DataFormat::Invalid &&
             llk_pack_is_unpack_to_dest_32b(output_id)) {
@@ -104,7 +104,7 @@ inline void llk_packer_wait_for_math_done() { _llk_packer_wait_for_math_done_();
  */
 template <bool is_fp32_dest_acc_en>
 inline void llk_pack_dest_section_done() {
-    if (llk_pack_has_unpack_to_dest_32b()) {
+    if constexpr (llk_pack_has_unpack_to_dest_32b()) {
         _llk_sync_get_<p_stall::PACK0>(semaphore::MATH_PACK);
         if constexpr (DST_SYNC_MODE == DstSync::SyncHalf) {
             _llk_sync_advance_dest_section_<ckernel::pack::TRISC_ID, true /*EN_32BIT_DEST*/, p_stall::PACK0>();

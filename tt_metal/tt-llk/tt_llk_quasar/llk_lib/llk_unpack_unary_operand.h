@@ -189,8 +189,8 @@ inline void _llk_unpack_unary_operand_init_(
     // table (which the unpack-side configure has already populated for this buf_desc_id).
     if constexpr (unpack_to_dest)
     {
-        const std::uint32_t bd_format = ckernel::trisc::bd_table[buf_desc_id].f.format;
-        if (bd_format == (std::uint32_t)DataFormat::Float32 || bd_format == (std::uint32_t)DataFormat::Int32)
+        const auto bd_format = static_cast<DataFormat>(ckernel::trisc::bd_table[buf_desc_id].f.format);
+        if (bd_format == DataFormat::Float32 || bd_format == DataFormat::Int32)
         {
             // Unpack owns the DEST section base in the unpack-to-dest path: it is the DEST
             // producer (UNP_DEST), so it programs the per-TRISC section base itself rather than
@@ -249,8 +249,8 @@ inline void _llk_unpack_unary_operand_(const std::uint32_t l1_tile_idx, const st
     // from the BD table (populated by the unpack-side configure for this buf_desc_id).
     if constexpr (unpack_to_dest)
     {
-        const std::uint32_t bd_format = ckernel::trisc::bd_table[buf_desc_id].f.format;
-        if (bd_format == (std::uint32_t)DataFormat::Float32 || bd_format == (std::uint32_t)DataFormat::Int32)
+        const auto bd_format = static_cast<DataFormat>(ckernel::trisc::bd_table[buf_desc_id].f.format);
+        if (bd_format == DataFormat::Float32 || bd_format == DataFormat::Int32)
         {
             // The math thread is the middleman with two single-counting semaphores (max=N each).
             // Without an extra wait on MATH_PACK, unpack could race 2N iterations ahead of pack

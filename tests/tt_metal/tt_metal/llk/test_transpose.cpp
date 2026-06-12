@@ -30,7 +30,10 @@
 #include "hostdevcommon/kernel_structs.h"
 #include <tt-logger/tt-logger.hpp>
 #include <tt-metalium/program.hpp>
+#include <tt_stl/span.hpp>
 #include "test_golden_impls.hpp"
+#include <tt-metalium/tt_backend_api_types.hpp>
+#include "tt_metal/test_utils/df/float32.hpp"
 #include <tt-metalium/tensor_accessor_args.hpp>
 #include "impl/data_format/bfloat16_utils.hpp"
 #include <tt-metalium/experimental/metal2_host_api/program.hpp>
