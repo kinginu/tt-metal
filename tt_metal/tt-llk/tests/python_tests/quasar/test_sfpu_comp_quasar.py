@@ -64,6 +64,20 @@ def prepare_comp_inputs(
     """
     input_torch_format = format_dict[input_format]
 
+    # Integer formats (Int32 / Int16, both signed): comparison-to-zero only depends on sign and
+    # zero-ness, not magnitude. The default integer stimuli are non-negative with no exact zeros,
+    # so flip signs from src_B and seed a few exact zeros/extremes to exercise all six modes.
+    if not input_torch_format.is_floating_point:
+        big = torch.iinfo(input_torch_format).max // 8
+        signs = torch.where(src_B.to(torch.float32) < 0.0, -1, 1)
+        values = (src_A.to(torch.int64) % big) * signs
+
+        flat = values.flatten()
+        for i, seed in enumerate([0, 1, -1, big, -big, 2]):
+            if i < flat.numel():
+                flat[i] = seed
+        return flat.reshape(values.shape).to(input_torch_format)
+
     src_A_float = src_A.to(torch.float32)
     src_B_float = src_B.to(torch.float32)
 
@@ -130,11 +144,20 @@ SFPU_COMP_FORMATS = input_output_formats(
     ]
 )
 
+SFPU_COMP_INT_FORMATS = input_output_formats(
+    [
+        DataFormat.Int32,
+        DataFormat.Int16,
+    ],
+    same=True,
+)
+
 
 @pytest.mark.quasar
 @parametrize(
-    op_formats_dest_acc_implied_math_input_dims=generate_sfpu_comp_combinations(
-        SFPU_COMP_FORMATS
+    op_formats_dest_acc_implied_math_input_dims=(
+        generate_sfpu_comp_combinations(SFPU_COMP_FORMATS)
+        + generate_sfpu_comp_combinations(SFPU_COMP_INT_FORMATS)
     ),
 )
 def test_sfpu_comp_quasar(op_formats_dest_acc_implied_math_input_dims):
@@ -163,15 +186,24 @@ def test_sfpu_comp_quasar(op_formats_dest_acc_implied_math_input_dims):
 
     num_faces = 4
 
-    generate_golden = get_golden_generator(UnarySFPUGolden)
-    golden_tensor = generate_golden(
-        op,
-        src_A,
-        formats.output_format,
-        dest_acc,
-        formats.input_format,
-        input_dimensions,
-    )
+    if format_dict[formats.input_format].is_floating_point:
+        generate_golden = get_golden_generator(UnarySFPUGolden)
+        golden_tensor = generate_golden(
+            op,
+            src_A,
+            formats.output_format,
+            dest_acc,
+            formats.input_format,
+            input_dimensions,
+        )
+    else:
+        # Integer comparison-to-zero: reuse UnarySFPUGolden's element-wise comparison methods
+        # (single source of truth for the semantics) but apply them directly. The generator's
+        # __call__ runs a float-only pipeline (float dst, tilize, FTZ) that would mangle integer
+        # values, and comp is element-wise so row-major order already matches the packed result.
+        comp_ops = UnarySFPUGolden().ops
+        op_res = [comp_ops[op](x) for x in src_A.flatten().tolist()]
+        golden_tensor = torch.tensor(op_res, dtype=format_dict[formats.output_format])
 
     # SFPU comp always unpacks directly to Dest; matrix pre-filtered to matched bit-widths.
     configuration = TestConfig(

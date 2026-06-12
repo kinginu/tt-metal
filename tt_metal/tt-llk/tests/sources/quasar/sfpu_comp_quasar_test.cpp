@@ -61,50 +61,12 @@ const bool is_int_fpu_en = false;
 #include "llk_math_common.h"
 #include "llk_math_eltwise_unary_datacopy.h"
 #include "llk_math_eltwise_unary_sfpu.h"
+#include "llk_sfpu/ckernel_sfpu_comp.h"
 #include "params.h"
-#include "sfpu/ckernel_sfpu_comp.h"
 
 using namespace ckernel;
 using namespace ckernel::math;
 using namespace ckernel::sfpu;
-
-// Dispatch the six comparison-to-zero modes to _calculate_zero_comp_<false, mode, ITERATIONS>.
-template <SfpuType op>
-struct sfpu_op_dispatcher
-{
-    static void call(int tile_idx)
-    {
-        _llk_math_eltwise_unary_sfpu_params_(_calculate_zero_comp_<false, op, SFPU_ITERATIONS>, tile_idx);
-    }
-};
-
-inline void call_sfpu_operation_quasar(int tile_idx)
-{
-    constexpr SfpuType op = SFPU_UNARY_OPERATION;
-    switch (op)
-    {
-        case SfpuType::equal_zero:
-            sfpu_op_dispatcher<SfpuType::equal_zero>::call(tile_idx);
-            break;
-        case SfpuType::not_equal_zero:
-            sfpu_op_dispatcher<SfpuType::not_equal_zero>::call(tile_idx);
-            break;
-        case SfpuType::less_than_zero:
-            sfpu_op_dispatcher<SfpuType::less_than_zero>::call(tile_idx);
-            break;
-        case SfpuType::greater_than_zero:
-            sfpu_op_dispatcher<SfpuType::greater_than_zero>::call(tile_idx);
-            break;
-        case SfpuType::less_than_equal_zero:
-            sfpu_op_dispatcher<SfpuType::less_than_equal_zero>::call(tile_idx);
-            break;
-        case SfpuType::greater_than_equal_zero:
-            sfpu_op_dispatcher<SfpuType::greater_than_equal_zero>::call(tile_idx);
-            break;
-        default:
-            break;
-    }
-}
 
 void run_kernel(RUNTIME_PARAMETERS params)
 {
@@ -118,10 +80,29 @@ void run_kernel(RUNTIME_PARAMETERS params)
     _llk_math_srcAB_hw_configure_<IMPLIED_MATH_FORMAT, is_fp32_dest_acc_en, is_int_fpu_en>(src_format, src_format);
 
     _llk_math_eltwise_sfpu_init_();
+    _init_zero_comp_();
 
+    // SFPU_UNARY_OPERATION is a constexpr SfpuType (generated per variant), so it feeds the
+    // template argument directly. FMT only needs to pick the per-format sfpmem mode and the 1/0
+    // result encoding; the SFPSETCC sequence is shared (sign-magnitude reads). All float widths —
+    // Float16, Float16_b, Float32 — share one width-agnostic instantiation: SFPLOAD/SFPSTORE
+    // DEFAULT resolves the actual width from the HW format config and the SFPU works in fp32.
     for (std::uint32_t i = 0; i < params.TILE_CNT; ++i)
     {
-        call_sfpu_operation_quasar(static_cast<int>(params.DST_INDEX + i));
+        const int dst_index = static_cast<int>(params.DST_INDEX + i);
+        switch (src_format)
+        {
+            case DataFormat::Int32:
+                _llk_math_eltwise_unary_sfpu_params_(_calculate_zero_comp_<false, DataFormat::Int32, SFPU_UNARY_OPERATION, SFPU_ITERATIONS>, dst_index);
+                break;
+            case DataFormat::Int16:
+                _llk_math_eltwise_unary_sfpu_params_(_calculate_zero_comp_<false, DataFormat::Int16, SFPU_UNARY_OPERATION, SFPU_ITERATIONS>, dst_index);
+                break;
+            default:
+                // Float16 / Float16_b / Float32 — width-agnostic float path.
+                _llk_math_eltwise_unary_sfpu_params_(_calculate_zero_comp_<false, DataFormat::Float32, SFPU_UNARY_OPERATION, SFPU_ITERATIONS>, dst_index);
+                break;
+        }
     }
 
     _llk_math_set_dvalid_<p_cleardvalid::SFPU, dest_sync>();
