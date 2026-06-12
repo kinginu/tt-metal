@@ -120,9 +120,7 @@ def test_unary_inverse_trig_functions_ttnn(input_shapes, torch_dtype, ttnn_dtype
         # accuracy is covered by the [-0.9, 0.9] and [-1, 1] parametrizations.
         g_nonfinite = ~torch.isfinite(golden_tensor)
         d_nonfinite = ~torch.isfinite(output_tensor)
-        torch.testing.assert_close(
-            g_nonfinite, d_nonfinite, msg="Non-finite positions differ between golden and device"
-        )
+        assert torch.equal(g_nonfinite, d_nonfinite), "Non-finite positions differ between golden and device"
     elif ttnn_dtype == ttnn.bfloat16 and low != -100:
         assert_with_ulp(output_tensor, golden_tensor, ulp_threshold=ulp_threshold)
         assert_with_pcc(output_tensor, golden_tensor, pcc=pcc)

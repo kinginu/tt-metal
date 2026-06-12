@@ -825,9 +825,7 @@ def test_edgecase_dims_eltwise_scalar_matrix_math(input_shape, scalar, ttnn_fn, 
         # Golden/device can disagree on NaN vs Inf; compare non-finite positions only.
         g_nonfinite = ~torch.isfinite(torch_output_tensor)
         d_nonfinite = ~torch.isfinite(tt_output_tensor)
-        torch.testing.assert_close(
-            g_nonfinite, d_nonfinite, msg="Non-finite positions differ between golden and device"
-        )
+        assert torch.equal(g_nonfinite, d_nonfinite), "Non-finite positions differ between golden and device"
         finite_mask = torch.isfinite(torch_output_tensor) & torch.isfinite(tt_output_tensor)
         if finite_mask.any():
             assert_with_ulp(
