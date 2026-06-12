@@ -54,6 +54,9 @@ MESH_GRAPH_DESC_16x1 = (
 MESH_GRAPH_DESC_8x1 = (
     "tests/tt_metal/tt_fabric/custom_mesh_descriptors/single_galaxy_8x1_torus_graph_descriptor.textproto"
 )
+MESH_GRAPH_DESC_BH_LB_8x1_LINEAR = (
+    "tests/tt_metal/tt_fabric/custom_mesh_descriptors/bh_lb_8x1_line_graph_descriptor.textproto"
+)
 # FYI: These tests also work in a MESH_GRAPH_DESC_1x4 setting (~1 minute to set up), but not in a 1x2 setting.
 
 
@@ -87,6 +90,13 @@ MOE_DEVICE_PARAMS_ROW = {
     "trace_region_size": 500000,
 }
 
+MOE_DEVICE_PARAMS_ROW_LINEAR = {
+    "dispatch_core_axis": ttnn.DispatchCoreAxis.ROW,
+    "reliability_mode": ttnn.FabricReliabilityMode.RELAXED_INIT,
+    "fabric_config": ttnn.FabricConfig.FABRIC_1D,
+    "trace_region_size": 750000,
+}
+
 
 @dataclasses.dataclass(frozen=True)
 class MoEMeshConfig:
@@ -97,9 +107,12 @@ class MoEMeshConfig:
     device_params: dict
     use_linear_topology: bool = False
     num_links: int = 4
+    cluster_axis: int = 1
 
     @property
     def mesh_shape(self):
+        if self.cluster_axis == 0:
+            return (self.mesh_width, 1)
         return (1, self.mesh_width)
 
 
@@ -290,27 +303,26 @@ _MODELS_BH_LB_1x8 = [
     MoEModelConfig("deepseek_v3",        N=2048, hidden_size=7168, selected_experts_k=8, has_bias_values=(False, True), tokens_per_device=8, test_modes=("perf", "correctness"),),
 ]
 
-_MOE_MESH_CONFIGS = [
-    MoEMeshConfig("1x8-torus",        8, MESH_GRAPH_DESC_1x8,              _MODELS_1x8,       MOE_DEVICE_PARAMS),
-    MoEMeshConfig("1x16-torus",      16, MESH_GRAPH_DESC_1x16,             _MODELS_1x16,      MOE_DEVICE_PARAMS),
-    MoEMeshConfig("1x8-linear",       8, MESH_GRAPH_DESC_1x8_LINEAR,       _MODELS_1x8,       MOE_DEVICE_PARAMS_LINEAR, use_linear_topology=True),
-    MoEMeshConfig("1x16-linear",     16, MESH_GRAPH_DESC_1x16_LINEAR,      _MODELS_1x16,      MOE_DEVICE_PARAMS_LINEAR, use_linear_topology=True,),
-    MoEMeshConfig("1x8-linear-bh_lb", 8, MESH_GRAPH_DESC_BH_LB_1x8_LINEAR, _MODELS_BH_LB_1x8, MOE_DEVICE_PARAMS_LINEAR, use_linear_topology=True, num_links=2),
-]
-# fmt: on
-
-MOE_COMPUTE_MODEL_TEST_CASES = _expand_mesh_model_test_cases(_MOE_MESH_CONFIGS)
-
-# fmt: off
 _MODELS_16x1_ROW = [
     MoEModelConfig("deepseek_v3", N=2048, hidden_size=7168, selected_experts_k=8, has_bias_values=(False,), test_modes=("correctness",)),
 ]
 _MODELS_8x1_ROW = [
     MoEModelConfig("gpt_oss", N=2880, hidden_size=2880, selected_experts_k=4, experts_per_device_values=(4,), has_bias_values=(True,), test_modes=("correctness",), activation_types=(MoEActivationFunction.SWIGLU,)),
 ]
+
+_MOE_MESH_CONFIGS = [
+    MoEMeshConfig("1x8-torus",        8, MESH_GRAPH_DESC_1x8,              _MODELS_1x8,       MOE_DEVICE_PARAMS),
+    MoEMeshConfig("1x16-torus",      16, MESH_GRAPH_DESC_1x16,             _MODELS_1x16,      MOE_DEVICE_PARAMS),
+    MoEMeshConfig("1x8-linear",       8, MESH_GRAPH_DESC_1x8_LINEAR,       _MODELS_1x8,       MOE_DEVICE_PARAMS_LINEAR, use_linear_topology=True),
+    MoEMeshConfig("1x16-linear",     16, MESH_GRAPH_DESC_1x16_LINEAR,      _MODELS_1x16,      MOE_DEVICE_PARAMS_LINEAR, use_linear_topology=True,),
+    MoEMeshConfig("1x8-linear-bh_lb", 8, MESH_GRAPH_DESC_BH_LB_1x8_LINEAR, _MODELS_BH_LB_1x8, MOE_DEVICE_PARAMS_LINEAR, use_linear_topology=True, num_links=2),
+    MoEMeshConfig("16x1-row",        16, MESH_GRAPH_DESC_16x1,             _MODELS_16x1_ROW,  MOE_DEVICE_PARAMS_ROW, cluster_axis=0),
+    MoEMeshConfig("8x1-row",          8, MESH_GRAPH_DESC_8x1,              _MODELS_8x1_ROW,   MOE_DEVICE_PARAMS_ROW, cluster_axis=0),
+    MoEMeshConfig("8x1-row-bh_lb",    8, MESH_GRAPH_DESC_BH_LB_8x1_LINEAR, _MODELS_8x1_ROW,  MOE_DEVICE_PARAMS_ROW_LINEAR, use_linear_topology=True, num_links=2, cluster_axis=0),
+]
 # fmt: on
-MODELS_16x1_ROW = _expand_model_configs(_MODELS_16x1_ROW)
-MODELS_8x1_ROW = _expand_model_configs(_MODELS_8x1_ROW)
+
+MOE_COMPUTE_MODEL_TEST_CASES = _expand_mesh_model_test_cases(_MOE_MESH_CONFIGS)
 
 
 def _run_model_test(
@@ -2386,82 +2398,7 @@ def test_moe_compute(
         topology=topology,
         num_links=mesh_cfg.num_links,
         bh_ring_size=bh_ring_size,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Parametrized model tests — ROW dispatch (16x1 mesh)
-# ---------------------------------------------------------------------------
-@pytest.mark.skipif(
-    not is_mesh_graph_descriptor_set(MESH_GRAPH_DESC_16x1),
-    reason=f"16x1 ROW tests require TT_MESH_GRAPH_DESC_PATH={MESH_GRAPH_DESC_16x1}",
-)
-@pytest.mark.parametrize("device_params", [MOE_DEVICE_PARAMS_ROW], indirect=True)
-@pytest.mark.parametrize("mesh_shape, mesh_device", [((16, 1), (16, 1))], indirect=["mesh_device"])
-@pytest.mark.parametrize(
-    "model_cfg, test_mode, has_bias, experts_per_device, activation_type, enable_trace, bh_ring_size",
-    MODELS_16x1_ROW,
-)
-def test_moe_compute_16x1_row(
-    mesh_device,
-    mesh_shape,
-    model_cfg,
-    test_mode,
-    has_bias,
-    experts_per_device,
-    activation_type,
-    enable_trace,
-    bh_ring_size,
-):
-    _run_model_test(
-        mesh_device,
-        mesh_shape,
-        enable_trace,
-        model_cfg,
-        test_mode,
-        has_bias,
-        experts_per_device,
-        activation_type,
-        bh_ring_size=bh_ring_size,
-        cluster_axis=0,
-    )
-
-
-# ---------------------------------------------------------------------------
-# Parametrized model tests — ROW dispatch (8x1 mesh)
-# ---------------------------------------------------------------------------
-@pytest.mark.skipif(
-    not is_mesh_graph_descriptor_set(MESH_GRAPH_DESC_8x1),
-    reason=f"8x1 ROW tests require TT_MESH_GRAPH_DESC_PATH={MESH_GRAPH_DESC_8x1}",
-)
-@pytest.mark.parametrize("device_params", [MOE_DEVICE_PARAMS_ROW], indirect=True)
-@pytest.mark.parametrize("mesh_shape, mesh_device", [((8, 1), (8, 1))], indirect=["mesh_device"])
-@pytest.mark.parametrize(
-    "model_cfg, test_mode, has_bias, experts_per_device, activation_type, enable_trace, bh_ring_size",
-    MODELS_8x1_ROW,
-)
-def test_moe_compute_8x1_row(
-    mesh_device,
-    mesh_shape,
-    model_cfg,
-    test_mode,
-    has_bias,
-    experts_per_device,
-    activation_type,
-    enable_trace,
-    bh_ring_size,
-):
-    _run_model_test(
-        mesh_device,
-        mesh_shape,
-        enable_trace,
-        model_cfg,
-        test_mode,
-        has_bias,
-        experts_per_device,
-        activation_type,
-        bh_ring_size=bh_ring_size,
-        cluster_axis=0,
+        cluster_axis=mesh_cfg.cluster_axis,
     )
 
 
