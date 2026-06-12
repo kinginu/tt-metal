@@ -221,7 +221,7 @@ def test_qwen_mlp_inference_wh(seq_len, batch_size, mesh_device, reset_seeds):
     [
         {
             "dispatch_core_axis": ttnn.DispatchCoreAxis.COL,
-            "fabric_config": True,
+            "fabric_config": ttnn.FabricConfig.FABRIC_2D_TORUS_XY,
         }
     ],
     indirect=True,
