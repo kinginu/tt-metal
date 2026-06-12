@@ -1963,6 +1963,12 @@ class UnarySFPUGolden:
     def __init__(self):
         self.ops = {
             MathOperation.Abs: self._abs,
+            MathOperation.EqualZero: self._equal_zero,
+            MathOperation.NotEqualZero: self._not_equal_zero,
+            MathOperation.LessThanZero: self._less_than_zero,
+            MathOperation.GreaterThanZero: self._greater_than_zero,
+            MathOperation.LessThanEqualZero: self._less_than_equal_zero,
+            MathOperation.GreaterThanEqualZero: self._greater_than_equal_zero,
             MathOperation.Atanh: self._atanh,
             MathOperation.Asinh: self._asinh,
             MathOperation.Acosh: self._acosh,
@@ -2187,6 +2193,33 @@ class UnarySFPUGolden:
     # Operation methods
     def _abs(self, x):
         return abs(x)
+
+    # Comparison-to-zero ops. These match Quasar SFPSETCC semantics, NOT IEEE:
+    #   eqz/nez are MAGNITUDE tests (both +0.0 and -0.0 count as zero).
+    #   ltz/gtz are pure SIGN-bit tests -> ltz(-0.0)=True, gtz(-0.0)=False,
+    #     gtz(+0.0)=True (sign bit clear), ltz(+0.0)=False.
+    #   lez = sign-negative OR magnitude-zero; gez = sign-positive OR magnitude-zero.
+    @staticmethod
+    def _sign_negative(x):
+        return math.copysign(1.0, x) < 0.0
+
+    def _equal_zero(self, x):
+        return 1.0 if x == 0.0 else 0.0
+
+    def _not_equal_zero(self, x):
+        return 1.0 if x != 0.0 else 0.0
+
+    def _less_than_zero(self, x):
+        return 1.0 if self._sign_negative(x) else 0.0
+
+    def _greater_than_zero(self, x):
+        return 1.0 if not self._sign_negative(x) else 0.0
+
+    def _less_than_equal_zero(self, x):
+        return 1.0 if (self._sign_negative(x) or x == 0.0) else 0.0
+
+    def _greater_than_equal_zero(self, x):
+        return 1.0 if (not self._sign_negative(x) or x == 0.0) else 0.0
 
     def _atanh(self, x):
         return self._torch_unary(x, torch.atanh)
