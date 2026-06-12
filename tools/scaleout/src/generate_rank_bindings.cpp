@@ -329,34 +329,8 @@ TopologyMappingWithLocalMaps run_topology_mapping(
         }
     }
 
-    // Apply the same galaxy corner pinnings as the control plane (Phase 2) so Phase 1 and Phase 2 place
-    // the galaxy pins identically. Full galaxies (per-host slice >= 32) pin all four corners; sub-galaxy
-    // slices pin only the NW corner (a single-position pin the solver can satisfy on a small slice).
-    if (cluster.is_ubb_galaxy()) {
-        const int world_size =
-            static_cast<int>(*tt::tt_metal::distributed::multihost::DistributedContext::get_current_world()->size());
-        for (const auto& mesh_id : mesh_graph.get_all_mesh_ids()) {
-            const auto& mesh_shape = mesh_graph.get_mesh_shape(mesh_id);
-            const bool is_1d = mesh_shape[0] == 1 || mesh_shape[1] == 1;
-            if (!is_1d && mesh_shape.mesh_size() % 32 == 0) {
-                const bool sub_galaxy_sliced = mesh_graph.get_mesh_shape(mesh_id, MeshHostRankId{0}).mesh_size() < 32;
-                auto mesh_pinnings = get_galaxy_fixed_asic_position_pinnings_for_mesh(
-                    mesh_id, mesh_shape, /*hard_pin_node_0=*/world_size == 1, /*nw_corner_only=*/sub_galaxy_sliced);
-                for (const auto& [fabric_node, positions] : mesh_pinnings) {
-                    for (const auto& position : positions) {
-                        config.pinnings.emplace_back(position, fabric_node);
-                    }
-                }
-            }
-        }
-    }
-
-    // Set per-mesh validation modes based on mesh graph policy
-    for (const auto& mesh_id : mesh_graph.get_all_mesh_ids()) {
-        config.mesh_validation_modes[mesh_id] = mesh_graph.is_intra_mesh_policy_relaxed(mesh_id)
-                                                    ? ::tt::tt_fabric::ConnectionValidationMode::RELAXED
-                                                    : ::tt::tt_fabric::ConnectionValidationMode::STRICT;
-    }
+    auto& metal_context = MetalContext::instance();
+    const auto& cluster = metal_context.get_cluster();
 
     if (!config.pinnings.empty()) {
         const auto& asic_descriptors = psd.get_asic_descriptors();
@@ -367,8 +341,6 @@ TopologyMappingWithLocalMaps run_topology_mapping(
         }
     }
 
-    auto& metal_context = MetalContext::instance();
-    const auto& cluster = metal_context.get_cluster();
     std::vector<MeshGraph> mesh_graphs;
     mesh_graphs.reserve(mgd_paths_in_order.size());
     for (const auto& p : mgd_paths_in_order) {
@@ -396,6 +368,29 @@ TopologyMappingWithLocalMaps run_topology_mapping(
             if (existing_relaxed != relaxed) {
                 throw std::runtime_error(
                     "Multi-MGD: conflicting inter-mesh validation policy between MGDs (STRICT vs RELAXED).");
+            }
+        }
+
+        // Apply the same galaxy corner pinnings as the control plane (Phase 2) so Phase 1 and Phase 2 place
+        // the galaxy pins identically. Full galaxies (per-host slice >= 32) pin all four corners; sub-galaxy
+        // slices pin only the NW corner (a single-position pin the solver can satisfy on a small slice).
+        if (cluster.is_ubb_galaxy()) {
+            const int world_size = static_cast<int>(
+                *tt::tt_metal::distributed::multihost::DistributedContext::get_current_world()->size());
+            for (const auto& mesh_id : mesh_graph.get_all_mesh_ids()) {
+                const auto& mesh_shape = mesh_graph.get_mesh_shape(mesh_id);
+                const bool is_1d = mesh_shape[0] == 1 || mesh_shape[1] == 1;
+                if (!is_1d && mesh_shape.mesh_size() % 32 == 0) {
+                    const bool sub_galaxy_sliced =
+                        mesh_graph.get_mesh_shape(mesh_id, MeshHostRankId{0}).mesh_size() < 32;
+                    auto mesh_pinnings = get_galaxy_fixed_asic_position_pinnings_for_mesh(
+                        mesh_id, mesh_shape, /*hard_pin_node_0=*/world_size == 1, /*nw_corner_only=*/sub_galaxy_sliced);
+                    for (const auto& [fabric_node, positions] : mesh_pinnings) {
+                        for (const auto& position : positions) {
+                            config.pinnings.emplace_back(position, fabric_node);
+                        }
+                    }
+                }
             }
         }
     }
@@ -976,7 +971,6 @@ int main(int argc, char** argv) {
                     ::close(dir_fd);
                 }
             };
-            fsync_path(output_file);
             fsync_path(rankfile_path);
             if (!mpi_rank_to_cluster_desc_path.empty()) {
                 fsync_path(output_dir / "phase2_mock_mapping.yaml");
