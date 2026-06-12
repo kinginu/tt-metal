@@ -7,7 +7,8 @@ Consolidated Quasar binary-SFPU test.
 Replaces the three standalone Quasar binary-SFPU test pairs (sfpu_binary [int],
 sfpu_binary_float [mul/div], sfpu_binary_max_min) with a single python driver +
 single cpp source (`sources/quasar/eltwise_binary_sfpu_quasar_test.cpp`) +
-dispatcher header (`sfpu_binary_operations_quasar.h`). The op is selected at
+dispatcher header (`sfpu_operations_quasar.h`, shared with the unary helpers).
+The op is selected at
 compile time via the `SFPU_BINARY_OP = ckernel::BinaryOp::<op>` constant (the LLK
 BinaryOp enum, extended with the comparison and max/min ops).
 

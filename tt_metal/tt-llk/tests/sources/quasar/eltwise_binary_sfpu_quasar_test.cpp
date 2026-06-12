@@ -5,7 +5,7 @@
 // Consolidated Quasar binary-SFPU test. The op is selected at compile time via
 // the SFPU_BINARY_OP = ckernel::BinaryOp::<op> constant emitted by the python
 // SFPU_BINARY_OP template parameter, then dispatched through
-// sfpu_binary_operations_quasar.h. One source covers the integer ops
+// sfpu_operations_quasar.h. One source covers the integer ops
 // (add/mul/gt/lt/le/ge), float mul/div, and float/int max/min.
 //
 // Buffer layout (params.TILE_CNT input tiles in buffer_A):
@@ -98,7 +98,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
 #include "llk_math_eltwise_unary_datacopy.h"
 #include "llk_math_eltwise_unary_sfpu.h"
 #include "params.h"
-#include "sfpu_binary_operations_quasar.h"
+#include "sfpu_operations_quasar.h"
 
 using namespace ckernel;
 using namespace ckernel::math;
