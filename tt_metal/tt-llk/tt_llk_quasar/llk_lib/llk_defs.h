@@ -118,6 +118,14 @@ enum class BinaryOp : std::uint8_t
     SUB,
     MUL,
     DIV,
+    // Comparison and max/min binary SFPU ops (used by the eltwise-binary-SFPU
+    // test dispatch; comparisons mirror Blackhole's BinaryOp).
+    GT,
+    LT,
+    LE,
+    GE,
+    MAX,
+    MIN,
 };
 
 enum class DstSync : std::uint8_t

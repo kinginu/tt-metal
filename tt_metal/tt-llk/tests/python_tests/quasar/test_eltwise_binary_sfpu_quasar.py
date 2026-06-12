@@ -8,7 +8,8 @@ Replaces the three standalone Quasar binary-SFPU test pairs (sfpu_binary [int],
 sfpu_binary_float [mul/div], sfpu_binary_max_min) with a single python driver +
 single cpp source (`sources/quasar/eltwise_binary_sfpu_quasar_test.cpp`) +
 dispatcher header (`sfpu_binary_operations_quasar.h`). The op is selected at
-compile time via the `SFPU_BINARY_OP = QuasarBinaryOp::<op>` constant.
+compile time via the `SFPU_BINARY_OP = ckernel::BinaryOp::<op>` constant (the LLK
+BinaryOp enum, extended with the comparison and max/min ops).
 
 The three op families differ structurally on Quasar (operand addressing, dispatch
 wrapper, init, dual unpack path, golden, stimuli), so they are kept as three
@@ -157,9 +158,7 @@ def _run_sfpu_binary_int_quasar(
 )
 def test_eltwise_binary_sfpu_add_int_quasar(data_format, dest_acc):
     """Binary SFPU ADD (Int32)."""
-    _run_sfpu_binary_int_quasar(
-        data_format, dest_acc, MathOperation.SfpuElwadd, "AddInt"
-    )
+    _run_sfpu_binary_int_quasar(data_format, dest_acc, MathOperation.SfpuElwadd, "ADD")
 
 
 @pytest.mark.quasar
@@ -169,15 +168,15 @@ def test_eltwise_binary_sfpu_add_int_quasar(data_format, dest_acc):
 def test_eltwise_binary_sfpu_mul_int_quasar(data_format, dest_acc):
     """Binary SFPU MUL (Int32)."""
     _run_sfpu_binary_int_quasar(
-        data_format, dest_acc, MathOperation.SfpuElwmulInt, "MulInt", clamp_inputs=1000
+        data_format, dest_acc, MathOperation.SfpuElwmulInt, "MUL", clamp_inputs=1000
     )
 
 
 _INT_COMP_OPS = [
-    ("GtInt", MathOperation.SfpuGtInt),
-    ("LtInt", MathOperation.SfpuLtInt),
-    ("LeInt", MathOperation.SfpuLeInt),
-    ("GeInt", MathOperation.SfpuGeInt),
+    ("GT", MathOperation.SfpuGtInt),
+    ("LT", MathOperation.SfpuLtInt),
+    ("LE", MathOperation.SfpuLeInt),
+    ("GE", MathOperation.SfpuGeInt),
 ]
 
 
@@ -354,7 +353,7 @@ def test_eltwise_binary_sfpu_div_quasar(
         implied_math_format,
         tile_indices,
         MathOperation.SfpuElwdiv,
-        "Div",
+        "DIV",
     )
 
 
@@ -375,7 +374,7 @@ def test_eltwise_binary_sfpu_mul_quasar(
         implied_math_format,
         tile_indices,
         MathOperation.SfpuElwmul,
-        "Mul",
+        "MUL",
     )
 
 
@@ -480,7 +479,7 @@ def _generate_max_min_int32_combinations(formats_list: List[FormatConfig]):
 def _run_max_min(
     formats, dest_acc, implied_math_format, is_max_op, input_dimensions, spec, is_int
 ):
-    binary_op = "Max" if is_max_op else "Min"
+    binary_op = "MAX" if is_max_op else "MIN"
     num_faces = 4
     torch.manual_seed(42)
 

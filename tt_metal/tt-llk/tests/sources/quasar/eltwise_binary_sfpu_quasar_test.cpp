@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Consolidated Quasar binary-SFPU test. The op is selected at compile time via
-// the SFPU_BINARY_OP = QuasarBinaryOp::<op> constant emitted by the python
+// the SFPU_BINARY_OP = ckernel::BinaryOp::<op> constant emitted by the python
 // SFPU_BINARY_OP template parameter, then dispatched through
 // sfpu_binary_operations_quasar.h. One source covers the integer ops
 // (add/mul/gt/lt/le/ge), float mul/div, and float/int max/min.
@@ -24,7 +24,6 @@
 #include "ckernel.h"
 #include "llk_defs.h"
 #include "llk_memory_checks.h"
-#include "sfpu_binary_op_quasar.h"
 #include "sfpu_stub.h"
 
 #ifdef LLK_TRISC_UNPACK
@@ -127,7 +126,7 @@ void run_kernel(RUNTIME_PARAMETERS params)
     // srcAB hw_configure. Max/min selects the Dest mode (fp32 / int32 / neither)
     // from the pack-src format so integer ordering is preserved; the other ops
     // (int add/mul/cmp, float mul/div) use the simple float/int32-disabled config.
-    if constexpr (quasar_binary_op_is_max_min(SFPU_BINARY_OP))
+    if constexpr (test_utils::quasar_binary_op_is_max_min(SFPU_BINARY_OP))
     {
         const DataFormat pack_src_format = static_cast<DataFormat>(formats.pack_src);
         if (is_fp32_dest_acc_en && pack_src_format == DataFormat::Float32)
