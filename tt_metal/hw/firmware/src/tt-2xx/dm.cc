@@ -215,7 +215,7 @@ extern "C" uint32_t _start1() {
         thread_sync_init();
 
         deassert_trisc();
-        DPRINT("DM0-FW: deasserted TRISC\n");
+        // DPRINT("DM0-FW: deasserted TRISC\n");
         wait_subordinates();
         mailboxes->go_messages[0].signal = RUN_MSG_DONE;
 
@@ -231,7 +231,7 @@ extern "C" uint32_t _start1() {
             // written in order, so it will arrive in order. We also have a barrier
             // before mcasting the launch message (as a hang workaround), which
             // ensures that the unicast data will also have been received.
-            DPRINT("DM0-FW: waiting for GO message\n");
+            // DPRINT("DM0-FW: waiting for GO message\n");
             while (((go_message_signal = mailboxes->go_messages[mailboxes->go_message_index].signal) != RUN_MSG_GO) &&
                    !(mailboxes->launch[mailboxes->launch_msg_rd_ptr].kernel_config.preload &
                      DISPATCH_ENABLE_FLAG_PRELOAD)) {
