@@ -305,6 +305,31 @@ def test_sfpu_reduce(
         formats.output_format, reduce_pool, mathop, input_dimensions, input_bounds
     )
 
-    assert passed_test(
+    passed = passed_test(
         golden_slice, res_slice, formats.output_format, custom_atol=reduce_atol
     )
+
+    if not passed:
+        # Dump the exact input/golden/result to the (CI) console so a non-reproducible-locally
+        # failure can be replayed. Print the full tensors (torch truncates by default) and the
+        # tilized src_A bytes that were actually sent to L1 so the case can be hardcoded.
+        torch.set_printoptions(
+            threshold=1_000_000, precision=6, sci_mode=False, linewidth=200
+        )
+        print("\n================= SFPU REDUCE FAILURE DEBUG =================")
+        print(
+            f"formats={formats} mathop={mathop} dest_acc={dest_acc} "
+            f"reduce_pool={reduce_pool} input_bounds={input_bounds} dims={input_dimensions}"
+        )
+        print(
+            f"num_blocks={num_blocks} num_tiles_in_block={num_tiles_in_block} tile_cnt={tile_cnt}"
+        )
+        print(f"src_A (tilized, sent to L1):\n{src_A.tolist()}")
+        print(f"src_A_untilized (golden input):\n{src_A_untilized}")
+        print(f"golden_slice:\n{golden_slice}")
+        print(f"res_slice:\n{res_slice}")
+        mism = (golden_slice != res_slice).nonzero().flatten().tolist()
+        print(f"mismatch indices ({len(mism)}): {mism}")
+        print("============================================================\n")
+
+    assert passed
