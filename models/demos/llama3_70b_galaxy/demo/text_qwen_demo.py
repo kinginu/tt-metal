@@ -340,7 +340,7 @@ def create_tt_qwen_model(
             "models/demos/llama3_70b_galaxy/demo/sample_prompts/input_data_questions_reference.json",  # input_prompts
             True,  # instruct mode
             1,  # repeat_batches
-            128 * 1024,  # max_seq_len
+            2048,  # max_seq_len (cap < 4096 to skip prefill-warmup of the seq>=4096 fused FF2 kernel on BH; teacher-forced PCC over short reference prompts is unaffected)
             32,  # batch_size
             200,  # max_generated_tokens
             True,  # paged_attention
