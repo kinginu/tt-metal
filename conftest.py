@@ -564,17 +564,17 @@ def mesh_device(request, silicon_arch_name, device_params):
             pytest.skip("Requested more devices than available. Test not applicable for machine")
         mesh_shape = ttnn.MeshShape(1, param)
 
-    override_trace_region_size = get_supported_trace_region_size(request, param)
-
-    if override_trace_region_size is None:
-        logger.info(f"No trace region size for {param!r}")
+    if "trace_region_size" not in device_params:
+        override_trace_region_size = get_supported_trace_region_size(request, param)
+        if override_trace_region_size is None:
+            logger.info(f"No trace region size for {param!r}")
+        else:
+            device_params["trace_region_size"] = override_trace_region_size
     else:
-        prior_trace_region_size = device_params.get("trace_region_size")
-        device_params["trace_region_size"] = override_trace_region_size
-        if prior_trace_region_size is not None:
-            logger.info(
-                f"Test had {prior_trace_region_size!r}, overriding trace region size to {override_trace_region_size!r} from YAML"
-            )
+        logger.info(
+            f"Keeping trace_region_size={device_params['trace_region_size']!r} "
+            f"from device_params (TRACE_MODEL_KEY path)"
+        )
 
     updated_device_params = get_updated_device_params(device_params)
     fabric_config = updated_device_params.pop("fabric_config", None)
