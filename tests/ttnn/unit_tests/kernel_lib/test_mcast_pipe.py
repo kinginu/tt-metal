@@ -52,11 +52,18 @@ VARIANTS = {
 }
 
 
-def _run_pipe(device, variant, recv_rect, sender_logical, payload_tiles, n_iters, pre_handshake):
-    """recv_rect = ((rx0,ry0),(rx1,ry1)) logical; sender_logical = (sx,sy) logical."""
+def _run_pipe(device, variant, recv_rect, sender_logical, payload_tiles, n_iters, pre_handshake, sender_noc=0):
+    """recv_rect = ((rx0,ry0),(rx1,ry1)) logical; sender_logical = (sx,sy) logical.
+    sender_noc selects which NoC the sender mcasts on: 0 (reader) or 1 (writer). On NoC1 the
+    hardware needs start=high-corner / end=low-corner; the test always passes the rect in
+    CANONICAL (low->high) order, so a green NoC1 run proves McastRect.start_end_for_noc() owns
+    the per-NoC corner swap (the old verbatim-passthrough would mis-encode the rect on NoC1)."""
     (rx0, ry0), (rx1, ry1) = recv_rect
     sx, sy = sender_logical
     stage_c, linked = VARIANTS[variant]
+    # one reader + one writer; swap which side is which so the sender lands on the requested NoC.
+    sender_cfg = ttnn.WriterConfigDescriptor() if sender_noc == 1 else ttnn.ReaderConfigDescriptor()
+    recv_cfg = ttnn.ReaderConfigDescriptor() if sender_noc == 1 else ttnn.WriterConfigDescriptor()
 
     nrx, nry = rx1 - rx0 + 1, ry1 - ry0 + 1
     num_recv = nrx * nry
@@ -141,7 +148,7 @@ def _run_pipe(device, variant, recv_rect, sender_logical, payload_tiles, n_iters
         compile_time_args=sender_ct,
         defines=_defines(stage_c, linked),
         runtime_args=sender_rt,
-        config=ttnn.ReaderConfigDescriptor(),
+        config=sender_cfg,
     )
 
     # ---- receiver kernel ----
@@ -160,7 +167,7 @@ def _run_pipe(device, variant, recv_rect, sender_logical, payload_tiles, n_iters
         compile_time_args=recv_ct,
         defines=_defines(stage_c, linked),
         runtime_args=recv_rt,
-        config=ttnn.WriterConfigDescriptor(),
+        config=recv_cfg,
     )
 
     pd = ttnn.ProgramDescriptor(kernels=[sender_k, recv_k], semaphores=semaphores, cbs=cbs)
@@ -212,6 +219,26 @@ def test_coverage(device, variant, rect_name, n_iters, payload_tiles):
         payload_tiles=payload_tiles,
         n_iters=n_iters,
         pre_handshake=False,
+    )
+
+
+# ---------- NoC1 corner-ordering: McastRect must own the per-NoC start/end swap ----------
+# Sender mcasts on NoC1, where the hardware wants start=high-corner / end=low-corner. The rect is
+# passed in CANONICAL (low->high) order regardless of NoC, so a PASS proves the Pipe re-derives the
+# routing-correct ordering from noc_index via McastRect.start_end_for_noc(). With the old
+# verbatim-passthrough this would mis-encode the rect on NoC1 (degenerate box -> wrong/hang).
+@pytest.mark.parametrize("variant", COVERAGE_VARIANTS)
+@pytest.mark.parametrize("rect_name", list(RECTS.keys()))
+def test_noc1_sender_corner_order(device, variant, rect_name):
+    _run_pipe(
+        device,
+        variant=variant,
+        recv_rect=RECTS[rect_name],
+        sender_logical=SENDER,
+        payload_tiles=4,
+        n_iters=8,
+        pre_handshake=False,
+        sender_noc=1,
     )
 
 

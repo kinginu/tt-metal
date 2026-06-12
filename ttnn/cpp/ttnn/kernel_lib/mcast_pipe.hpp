@@ -97,6 +97,14 @@ enum class Staging { Flag, Counter };
 //   SENDER side  : the receiver rectangle.
 //   RECEIVER side: {sender_x, sender_y} 1x1 — points back at the sender (the target of the
 //                  R->S "consumed" ack). Construct with the `single_core` factory below.
+//
+// CORNER ORDERING IS OWNED HERE (not the caller). The mcast hardware walks the rect from
+// `start` in the NoC's routing direction up to `end`, so `start` must be the corner the
+// routing reaches FIRST: the low corner on NoC0 (+x/+y), the high corner on NoC1 (-x/-y).
+// `McastRect` stores the four numbers in WHATEVER order it was constructed with — canonical
+// top-left→bottom-right, or already swapped (some hosts std::swap for NOC_1) — and
+// `start_end_for_noc()` always re-derives the routing-correct (start,end) for the live NoC.
+// So however the rect is initialized, the mcast APIs always receive the corners in good order.
 // -----------------------------------------------------------------------------
 struct McastRect {
     uint32_t x0{};
@@ -106,6 +114,23 @@ struct McastRect {
 
     // Receiver-side helper: a degenerate 1x1 rect pointing at the sender core.
     static constexpr McastRect single_core(uint32_t x, uint32_t y) { return McastRect{x, y, x, y}; }
+
+    // Order-agnostic normalized bounds (tolerate either input ordering).
+    constexpr uint32_t xlo() const { return x0 < x1 ? x0 : x1; }
+    constexpr uint32_t xhi() const { return x0 < x1 ? x1 : x0; }
+    constexpr uint32_t ylo() const { return y0 < y1 ? y0 : y1; }
+    constexpr uint32_t yhi() const { return y0 < y1 ? y1 : y0; }
+
+    // Routing-correct (start_x, start_y, end_x, end_y) for the mcast APIs on `noc_id`.
+    // NoC0 → start = low corner; NoC1 → start = high corner (the per-NoC swap the host used to
+    // do with std::swap on NOC_1 — now owned by the rect, applied as a full diagonal-corner swap
+    // to match the host's CoreCoord-pair swap).
+    struct Bounds {
+        uint32_t sx, sy, ex, ey;
+    };
+    constexpr Bounds start_end_for_noc(uint8_t noc_id) const {
+        return noc_id == 1 ? Bounds{xhi(), yhi(), xlo(), ylo()} : Bounds{xlo(), ylo(), xhi(), yhi()};
+    }
 };
 
 // -----------------------------------------------------------------------------
@@ -206,11 +231,7 @@ private:
     bool sender_in_rect_() const {
         const uint32_t mx = my_x[noc_.get_noc_id()];
         const uint32_t my = my_y[noc_.get_noc_id()];
-        const uint32_t xlo = dest_.x0 < dest_.x1 ? dest_.x0 : dest_.x1;
-        const uint32_t xhi = dest_.x0 < dest_.x1 ? dest_.x1 : dest_.x0;
-        const uint32_t ylo = dest_.y0 < dest_.y1 ? dest_.y0 : dest_.y1;
-        const uint32_t yhi = dest_.y0 < dest_.y1 ? dest_.y1 : dest_.y0;
-        return mx >= xlo && mx <= xhi && my >= ylo && my <= yhi;
+        return mx >= dest_.xlo() && mx <= dest_.xhi() && my >= dest_.ylo() && my <= dest_.yhi();
     }
 
     // ---- data multicast (degenerate self-only already short-circuited in send()) ----
@@ -218,8 +239,8 @@ private:
     // self-write (the API counts self there). EXCLUDE writes `num_active_cores` cores even
     // when the sender sits inside the box.
     void send_data_(uint32_t src_l1, uint32_t dst_l1, uint32_t size, bool loopback) {
-        const uint64_t dst_noc =
-            ::get_noc_multicast_addr(dest_.x0, dest_.y0, dest_.x1, dest_.y1, dst_l1, noc_.get_noc_id());
+        const auto r = dest_.start_end_for_noc(noc_.get_noc_id());  // routing-correct start/end
+        const uint64_t dst_noc = ::get_noc_multicast_addr(r.sx, r.sy, r.ex, r.ey, dst_l1, noc_.get_noc_id());
         if (loopback) {
             noc_async_write_multicast_loopback_src(
                 src_l1, dst_noc, size, num_active_cores_ + 1, /*linked=*/LINK, noc_.get_noc_id());
@@ -236,16 +257,17 @@ private:
     // `loopback` mirrors the data mcast of the same send() (INV4: same path); send_signal()
     // has no data, so its flag is always EXCLUDE_SRC.
     void raise_flag_(uint32_t value = VALID, bool loopback = false) {
+        const auto r = dest_.start_end_for_noc(noc_.get_noc_id());  // routing-correct start/end
         if constexpr (STAGING == Staging::Counter) {
-            data_ready_.inc_multicast(noc_, dest_.x0, dest_.y0, dest_.x1, dest_.y1, value, num_active_cores_);
+            data_ready_.inc_multicast(noc_, r.sx, r.sy, r.ex, r.ey, value, num_active_cores_);
         } else {
             data_ready_.set(value);
             if (loopback) {
                 data_ready_.set_multicast<Noc::McastMode::INCLUDE_SRC>(
-                    noc_, dest_.x0, dest_.y0, dest_.x1, dest_.y1, num_active_cores_ + 1, /*linked=*/false);
+                    noc_, r.sx, r.sy, r.ex, r.ey, num_active_cores_ + 1, /*linked=*/false);
             } else {
                 data_ready_.set_multicast<Noc::McastMode::EXCLUDE_SRC>(
-                    noc_, dest_.x0, dest_.y0, dest_.x1, dest_.y1, num_active_cores_, /*linked=*/false);
+                    noc_, r.sx, r.sy, r.ex, r.ey, num_active_cores_, /*linked=*/false);
             }
         }
     }
