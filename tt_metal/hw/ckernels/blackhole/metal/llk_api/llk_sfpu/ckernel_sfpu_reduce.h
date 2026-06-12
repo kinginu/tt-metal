@@ -40,7 +40,7 @@ constexpr std::uint32_t ROWS_PER_FACE = 16;
 constexpr std::uint32_t CLEAR_REG = p_sfpu::LREG12;
 
 template <bool clear_high_bits>
-inline void TT_SFPLOAD_EXT(
+inline void load_and_clear_high_bits(
     const std::uint32_t lreg_ind,
     const InstrModLoadStore instr_mod0,
     const std::uint32_t sfpu_addr_mode,
@@ -86,13 +86,13 @@ inline void load_face_data(std::uint32_t face_addr, std::uint32_t column_offset)
     // Load the 4 row-groups into DST_LREG_BASE..DST_LREG_BASE+3. DST_LREG_BASE defaults to LREG0, but
     // callers can target LREG4 to feed a recorded swap buffer that operates on LREG4-7 directly, avoiding
     // a redundant LREG0-3 -> LREG4-7 shuffle.
-    TT_SFPLOAD_EXT<clear_high_bits>(
+    load_and_clear_high_bits<clear_high_bits>(
         DST_LREG_BASE + 0, INSTRUCTION_MODE, ADDR_MOD_7, face_addr + column_offset);  // rows 0-3
-    TT_SFPLOAD_EXT<clear_high_bits>(
+    load_and_clear_high_bits<clear_high_bits>(
         DST_LREG_BASE + 1, INSTRUCTION_MODE, ADDR_MOD_7, face_addr + column_offset + ROWS_PER_LOAD);  // rows 4-7
-    TT_SFPLOAD_EXT<clear_high_bits>(
+    load_and_clear_high_bits<clear_high_bits>(
         DST_LREG_BASE + 2, INSTRUCTION_MODE, ADDR_MOD_7, face_addr + column_offset + 2 * ROWS_PER_LOAD);  // rows 8-11
-    TT_SFPLOAD_EXT<clear_high_bits>(
+    load_and_clear_high_bits<clear_high_bits>(
         DST_LREG_BASE + 3, INSTRUCTION_MODE, ADDR_MOD_7, face_addr + column_offset + 3 * ROWS_PER_LOAD);  // rows 12-15
 }
 
@@ -106,26 +106,26 @@ inline void load_face_data(std::uint32_t face_addr, std::uint32_t column_offset)
 template <InstrModLoadStore INSTRUCTION_MODE, bool clear_high_bits>
 inline void load_face_data(std::uint32_t upper_face_addr, std::uint32_t lower_face_addr, std::uint32_t column_offset) {
     // Load upper face data (Face 0 or Face 1) into LREG0-3
-    TT_SFPLOAD_EXT<clear_high_bits>(
+    load_and_clear_high_bits<clear_high_bits>(
         p_sfpu::LREG0, INSTRUCTION_MODE, ADDR_MOD_7, upper_face_addr + column_offset);  // rows 0-3
-    TT_SFPLOAD_EXT<clear_high_bits>(
+    load_and_clear_high_bits<clear_high_bits>(
         p_sfpu::LREG1, INSTRUCTION_MODE, ADDR_MOD_7, upper_face_addr + column_offset + ROWS_PER_LOAD);  // rows 4-7
-    TT_SFPLOAD_EXT<clear_high_bits>(
+    load_and_clear_high_bits<clear_high_bits>(
         p_sfpu::LREG2, INSTRUCTION_MODE, ADDR_MOD_7, upper_face_addr + column_offset + 2 * ROWS_PER_LOAD);  // rows 8-11
-    TT_SFPLOAD_EXT<clear_high_bits>(
+    load_and_clear_high_bits<clear_high_bits>(
         p_sfpu::LREG3,
         INSTRUCTION_MODE,
         ADDR_MOD_7,
         upper_face_addr + column_offset + 3 * ROWS_PER_LOAD);  // rows 12-15
 
     // Load lower face data (Face 2 or Face 3) into LREG4-7
-    TT_SFPLOAD_EXT<clear_high_bits>(
+    load_and_clear_high_bits<clear_high_bits>(
         p_sfpu::LREG4, INSTRUCTION_MODE, ADDR_MOD_7, lower_face_addr + column_offset);  // rows 0-3
-    TT_SFPLOAD_EXT<clear_high_bits>(
+    load_and_clear_high_bits<clear_high_bits>(
         p_sfpu::LREG5, INSTRUCTION_MODE, ADDR_MOD_7, lower_face_addr + column_offset + ROWS_PER_LOAD);  // rows 4-7
-    TT_SFPLOAD_EXT<clear_high_bits>(
+    load_and_clear_high_bits<clear_high_bits>(
         p_sfpu::LREG6, INSTRUCTION_MODE, ADDR_MOD_7, lower_face_addr + column_offset + 2 * ROWS_PER_LOAD);  // rows 8-11
-    TT_SFPLOAD_EXT<clear_high_bits>(
+    load_and_clear_high_bits<clear_high_bits>(
         p_sfpu::LREG7,
         INSTRUCTION_MODE,
         ADDR_MOD_7,
@@ -233,11 +233,12 @@ inline void perform_reduce_col_sum_avg() {
             const std::uint32_t lower_base = lower_face_addr + column_offset;
 
             // Upper face -> LREG0-3, scratch from the still-free LREG4-7
-            TT_SFPLOAD_EXT<clear_high_bits>(p_sfpu::LREG0, INSTRUCTION_MODE, ADDR_MOD_7, upper_base);
-            TT_SFPLOAD_EXT<clear_high_bits>(p_sfpu::LREG1, INSTRUCTION_MODE, ADDR_MOD_7, upper_base + ROWS_PER_LOAD);
-            TT_SFPLOAD_EXT<clear_high_bits>(
+            load_and_clear_high_bits<clear_high_bits>(p_sfpu::LREG0, INSTRUCTION_MODE, ADDR_MOD_7, upper_base);
+            load_and_clear_high_bits<clear_high_bits>(
+                p_sfpu::LREG1, INSTRUCTION_MODE, ADDR_MOD_7, upper_base + ROWS_PER_LOAD);
+            load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG2, INSTRUCTION_MODE, ADDR_MOD_7, upper_base + 2 * ROWS_PER_LOAD);
-            TT_SFPLOAD_EXT<clear_high_bits>(
+            load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG3, INSTRUCTION_MODE, ADDR_MOD_7, upper_base + 3 * ROWS_PER_LOAD);
             convert_int_representation_inplace(p_sfpu::LREG0, p_sfpu::LREG4);
             convert_int_representation_inplace(p_sfpu::LREG1, p_sfpu::LREG5);
@@ -248,11 +249,12 @@ inline void perform_reduce_col_sum_avg() {
             TTI_SFPIADD(0, p_sfpu::LREG1, p_sfpu::LREG0, 4);  // LREG0 = sum of upper face; LREG1-3 now free
 
             // Lower face -> LREG4-7, scratch from the now-free LREG1-3
-            TT_SFPLOAD_EXT<clear_high_bits>(p_sfpu::LREG4, INSTRUCTION_MODE, ADDR_MOD_7, lower_base);
-            TT_SFPLOAD_EXT<clear_high_bits>(p_sfpu::LREG5, INSTRUCTION_MODE, ADDR_MOD_7, lower_base + ROWS_PER_LOAD);
-            TT_SFPLOAD_EXT<clear_high_bits>(
+            load_and_clear_high_bits<clear_high_bits>(p_sfpu::LREG4, INSTRUCTION_MODE, ADDR_MOD_7, lower_base);
+            load_and_clear_high_bits<clear_high_bits>(
+                p_sfpu::LREG5, INSTRUCTION_MODE, ADDR_MOD_7, lower_base + ROWS_PER_LOAD);
+            load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG6, INSTRUCTION_MODE, ADDR_MOD_7, lower_base + 2 * ROWS_PER_LOAD);
-            TT_SFPLOAD_EXT<clear_high_bits>(
+            load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG7, INSTRUCTION_MODE, ADDR_MOD_7, lower_base + 3 * ROWS_PER_LOAD);
             convert_int_representation_inplace(p_sfpu::LREG4, p_sfpu::LREG1);
             convert_int_representation_inplace(p_sfpu::LREG5, p_sfpu::LREG2);
@@ -487,31 +489,31 @@ inline void perform_reduce_row_max_tile(std::uint32_t tile_row_offset, std::uint
             std::uint32_t row_offset_first = row_group * 8;
             std::uint32_t row_offset_second = row_offset_first + 4;
 
-            TT_SFPLOAD_EXT<clear_high_bits>(
+            load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG0, INSTRUCTION_MODE, ADDR_MOD_7, tile_row_offset + face_pair_base + row_offset_first);
-            TT_SFPLOAD_EXT<clear_high_bits>(
+            load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG1, INSTRUCTION_MODE, ADDR_MOD_7, tile_row_offset + face_pair_base + row_offset_first + 2);
-            TT_SFPLOAD_EXT<clear_high_bits>(
+            load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG2,
                 INSTRUCTION_MODE,
                 ADDR_MOD_7,
                 tile_row_offset + face_pair_base + ROWS_PER_FACE + row_offset_first);
-            TT_SFPLOAD_EXT<clear_high_bits>(
+            load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG3,
                 INSTRUCTION_MODE,
                 ADDR_MOD_7,
                 tile_row_offset + face_pair_base + ROWS_PER_FACE + row_offset_first + 2);
 
-            TT_SFPLOAD_EXT<clear_high_bits>(
+            load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG4, INSTRUCTION_MODE, ADDR_MOD_7, tile_row_offset + face_pair_base + row_offset_second);
-            TT_SFPLOAD_EXT<clear_high_bits>(
+            load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG5, INSTRUCTION_MODE, ADDR_MOD_7, tile_row_offset + face_pair_base + row_offset_second + 2);
-            TT_SFPLOAD_EXT<clear_high_bits>(
+            load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG6,
                 INSTRUCTION_MODE,
                 ADDR_MOD_7,
                 tile_row_offset + face_pair_base + ROWS_PER_FACE + row_offset_second);
-            TT_SFPLOAD_EXT<clear_high_bits>(
+            load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG7,
                 INSTRUCTION_MODE,
                 ADDR_MOD_7,
@@ -571,25 +573,25 @@ inline void max_first_columns_across_tiles(std::uint32_t tile_row_base, std::uin
     for (std::uint32_t batch = 0; batch < 2; batch++) {
         std::uint32_t base_idx = batch * 4;
 
-        TT_SFPLOAD_EXT<clear_high_bits>(
+        load_and_clear_high_bits<clear_high_bits>(
             p_sfpu::LREG0, INSTRUCTION_MODE, ADDR_MOD_7, tile_row_base + RESULT_ROWS[base_idx + 0]);
-        TT_SFPLOAD_EXT<clear_high_bits>(
+        load_and_clear_high_bits<clear_high_bits>(
             p_sfpu::LREG1, INSTRUCTION_MODE, ADDR_MOD_7, tile_row_base + RESULT_ROWS[base_idx + 1]);
-        TT_SFPLOAD_EXT<clear_high_bits>(
+        load_and_clear_high_bits<clear_high_bits>(
             p_sfpu::LREG2, INSTRUCTION_MODE, ADDR_MOD_7, tile_row_base + RESULT_ROWS[base_idx + 2]);
-        TT_SFPLOAD_EXT<clear_high_bits>(
+        load_and_clear_high_bits<clear_high_bits>(
             p_sfpu::LREG3, INSTRUCTION_MODE, ADDR_MOD_7, tile_row_base + RESULT_ROWS[base_idx + 3]);
 
         for (std::uint32_t t = 1; t < block_ct_dim; t++) {
             std::uint32_t tile_offset = tile_row_base + t * ROWS_PER_TILE;
 
-            TT_SFPLOAD_EXT<clear_high_bits>(
+            load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG4, INSTRUCTION_MODE, ADDR_MOD_7, tile_offset + RESULT_ROWS[base_idx + 0]);
-            TT_SFPLOAD_EXT<clear_high_bits>(
+            load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG5, INSTRUCTION_MODE, ADDR_MOD_7, tile_offset + RESULT_ROWS[base_idx + 1]);
-            TT_SFPLOAD_EXT<clear_high_bits>(
+            load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG6, INSTRUCTION_MODE, ADDR_MOD_7, tile_offset + RESULT_ROWS[base_idx + 2]);
-            TT_SFPLOAD_EXT<clear_high_bits>(
+            load_and_clear_high_bits<clear_high_bits>(
                 p_sfpu::LREG7, INSTRUCTION_MODE, ADDR_MOD_7, tile_offset + RESULT_ROWS[base_idx + 3]);
 
             TTI_SFPSWAP(0, p_sfpu::LREG0, p_sfpu::LREG4, 1);
@@ -707,11 +709,12 @@ inline void perform_reduce_row_sum_tile(std::uint32_t tile_row_offset, std::uint
                 // the LREG0=sum(LREG0-3), LREG4=sum(LREG4-7) result of replay(0,6).
 
                 // Group A (first 4 rows) -> LREG0-3, scratch from the still-free LREG4-7
-                TT_SFPLOAD_EXT<clear_high_bits>(p_sfpu::LREG0, INSTRUCTION_MODE, ADDR_MOD_7, group_a_base);
-                TT_SFPLOAD_EXT<clear_high_bits>(p_sfpu::LREG1, INSTRUCTION_MODE, ADDR_MOD_7, group_a_base + 2);
-                TT_SFPLOAD_EXT<clear_high_bits>(
+                load_and_clear_high_bits<clear_high_bits>(p_sfpu::LREG0, INSTRUCTION_MODE, ADDR_MOD_7, group_a_base);
+                load_and_clear_high_bits<clear_high_bits>(
+                    p_sfpu::LREG1, INSTRUCTION_MODE, ADDR_MOD_7, group_a_base + 2);
+                load_and_clear_high_bits<clear_high_bits>(
                     p_sfpu::LREG2, INSTRUCTION_MODE, ADDR_MOD_7, group_a_base + ROWS_PER_FACE);
-                TT_SFPLOAD_EXT<clear_high_bits>(
+                load_and_clear_high_bits<clear_high_bits>(
                     p_sfpu::LREG3, INSTRUCTION_MODE, ADDR_MOD_7, group_a_base + ROWS_PER_FACE + 2);
                 convert_int_representation_inplace(p_sfpu::LREG0, p_sfpu::LREG4);
                 convert_int_representation_inplace(p_sfpu::LREG1, p_sfpu::LREG5);
@@ -722,11 +725,12 @@ inline void perform_reduce_row_sum_tile(std::uint32_t tile_row_offset, std::uint
                 TTI_SFPIADD(0, p_sfpu::LREG1, p_sfpu::LREG0, 4);  // LREG0 = sum of group A; LREG1-3 now free
 
                 // Group B (next 4 rows) -> LREG4-7, scratch from the now-free LREG1-3
-                TT_SFPLOAD_EXT<clear_high_bits>(p_sfpu::LREG4, INSTRUCTION_MODE, ADDR_MOD_7, group_b_base);
-                TT_SFPLOAD_EXT<clear_high_bits>(p_sfpu::LREG5, INSTRUCTION_MODE, ADDR_MOD_7, group_b_base + 2);
-                TT_SFPLOAD_EXT<clear_high_bits>(
+                load_and_clear_high_bits<clear_high_bits>(p_sfpu::LREG4, INSTRUCTION_MODE, ADDR_MOD_7, group_b_base);
+                load_and_clear_high_bits<clear_high_bits>(
+                    p_sfpu::LREG5, INSTRUCTION_MODE, ADDR_MOD_7, group_b_base + 2);
+                load_and_clear_high_bits<clear_high_bits>(
                     p_sfpu::LREG6, INSTRUCTION_MODE, ADDR_MOD_7, group_b_base + ROWS_PER_FACE);
-                TT_SFPLOAD_EXT<clear_high_bits>(
+                load_and_clear_high_bits<clear_high_bits>(
                     p_sfpu::LREG7, INSTRUCTION_MODE, ADDR_MOD_7, group_b_base + ROWS_PER_FACE + 2);
                 convert_int_representation_inplace(p_sfpu::LREG4, p_sfpu::LREG1);
                 convert_int_representation_inplace(p_sfpu::LREG5, p_sfpu::LREG2);
@@ -737,19 +741,21 @@ inline void perform_reduce_row_sum_tile(std::uint32_t tile_row_offset, std::uint
                 TTI_SFPIADD(0, p_sfpu::LREG5, p_sfpu::LREG4, 4);  // LREG4 = sum of group B
             } else {
                 // Load 4 rows from face 0 (or 2) and face 1 (or 3)
-                TT_SFPLOAD_EXT<clear_high_bits>(p_sfpu::LREG0, INSTRUCTION_MODE, ADDR_MOD_7, group_a_base);
-                TT_SFPLOAD_EXT<clear_high_bits>(p_sfpu::LREG1, INSTRUCTION_MODE, ADDR_MOD_7, group_a_base + 2);
-                TT_SFPLOAD_EXT<clear_high_bits>(
+                load_and_clear_high_bits<clear_high_bits>(p_sfpu::LREG0, INSTRUCTION_MODE, ADDR_MOD_7, group_a_base);
+                load_and_clear_high_bits<clear_high_bits>(
+                    p_sfpu::LREG1, INSTRUCTION_MODE, ADDR_MOD_7, group_a_base + 2);
+                load_and_clear_high_bits<clear_high_bits>(
                     p_sfpu::LREG2, INSTRUCTION_MODE, ADDR_MOD_7, group_a_base + ROWS_PER_FACE);
-                TT_SFPLOAD_EXT<clear_high_bits>(
+                load_and_clear_high_bits<clear_high_bits>(
                     p_sfpu::LREG3, INSTRUCTION_MODE, ADDR_MOD_7, group_a_base + ROWS_PER_FACE + 2);
 
                 // Load next 4 rows from face 0 (or 2) and face 1 (or 3)
-                TT_SFPLOAD_EXT<clear_high_bits>(p_sfpu::LREG4, INSTRUCTION_MODE, ADDR_MOD_7, group_b_base);
-                TT_SFPLOAD_EXT<clear_high_bits>(p_sfpu::LREG5, INSTRUCTION_MODE, ADDR_MOD_7, group_b_base + 2);
-                TT_SFPLOAD_EXT<clear_high_bits>(
+                load_and_clear_high_bits<clear_high_bits>(p_sfpu::LREG4, INSTRUCTION_MODE, ADDR_MOD_7, group_b_base);
+                load_and_clear_high_bits<clear_high_bits>(
+                    p_sfpu::LREG5, INSTRUCTION_MODE, ADDR_MOD_7, group_b_base + 2);
+                load_and_clear_high_bits<clear_high_bits>(
                     p_sfpu::LREG6, INSTRUCTION_MODE, ADDR_MOD_7, group_b_base + ROWS_PER_FACE);
-                TT_SFPLOAD_EXT<clear_high_bits>(
+                load_and_clear_high_bits<clear_high_bits>(
                     p_sfpu::LREG7, INSTRUCTION_MODE, ADDR_MOD_7, group_b_base + ROWS_PER_FACE + 2);
 
                 // Perform vertical sum of loaded rows via replay buffer
@@ -810,13 +816,13 @@ inline void sum_first_columns_across_tiles(std::uint32_t tile_row_base, std::uin
         std::uint32_t base_idx = batch * 4;
 
         // Load tile 0's four LREGs at this batch's offsets (0,4,8,12 or 32,36,40,44) into LREG0-3
-        TT_SFPLOAD_EXT<clear_high_bits>(
+        load_and_clear_high_bits<clear_high_bits>(
             p_sfpu::LREG0, INSTRUCTION_MODE, ADDR_MOD_7, tile_row_base + RESULT_ROWS[base_idx + 0]);
-        TT_SFPLOAD_EXT<clear_high_bits>(
+        load_and_clear_high_bits<clear_high_bits>(
             p_sfpu::LREG1, INSTRUCTION_MODE, ADDR_MOD_7, tile_row_base + RESULT_ROWS[base_idx + 1]);
-        TT_SFPLOAD_EXT<clear_high_bits>(
+        load_and_clear_high_bits<clear_high_bits>(
             p_sfpu::LREG2, INSTRUCTION_MODE, ADDR_MOD_7, tile_row_base + RESULT_ROWS[base_idx + 2]);
-        TT_SFPLOAD_EXT<clear_high_bits>(
+        load_and_clear_high_bits<clear_high_bits>(
             p_sfpu::LREG3, INSTRUCTION_MODE, ADDR_MOD_7, tile_row_base + RESULT_ROWS[base_idx + 3]);
 
         // Int32: dest holds sign-magnitude; convert tile 0's partial sums to two's-complement so the
@@ -839,20 +845,20 @@ inline void sum_first_columns_across_tiles(std::uint32_t tile_row_base, std::uin
                 // a time: load into LREG4, convert to two's-complement (scratch LREG5), then add into its
                 // accumulator. LREG5-7 stay free for scratch.
                 for (std::uint32_t j = 0; j < 4; j++) {
-                    TT_SFPLOAD_EXT<clear_high_bits>(
+                    load_and_clear_high_bits<clear_high_bits>(
                         p_sfpu::LREG4, INSTRUCTION_MODE, ADDR_MOD_7, tile_offset + RESULT_ROWS[base_idx + j]);
                     convert_int_representation_inplace(p_sfpu::LREG4, p_sfpu::LREG5);
                     TTI_SFPIADD(0, p_sfpu::LREG4, p_sfpu::LREG0 + j, 4);  // LREG(j) += LREG4
                 }
             } else {
                 // Load tile t's four LREGs at the same offsets into LREG4-7
-                TT_SFPLOAD_EXT<clear_high_bits>(
+                load_and_clear_high_bits<clear_high_bits>(
                     p_sfpu::LREG4, INSTRUCTION_MODE, ADDR_MOD_7, tile_offset + RESULT_ROWS[base_idx + 0]);
-                TT_SFPLOAD_EXT<clear_high_bits>(
+                load_and_clear_high_bits<clear_high_bits>(
                     p_sfpu::LREG5, INSTRUCTION_MODE, ADDR_MOD_7, tile_offset + RESULT_ROWS[base_idx + 1]);
-                TT_SFPLOAD_EXT<clear_high_bits>(
+                load_and_clear_high_bits<clear_high_bits>(
                     p_sfpu::LREG6, INSTRUCTION_MODE, ADDR_MOD_7, tile_offset + RESULT_ROWS[base_idx + 2]);
-                TT_SFPLOAD_EXT<clear_high_bits>(
+                load_and_clear_high_bits<clear_high_bits>(
                     p_sfpu::LREG7, INSTRUCTION_MODE, ADDR_MOD_7, tile_offset + RESULT_ROWS[base_idx + 3]);
 
                 // Add LREG4-7 into LREG0-3
@@ -1189,10 +1195,12 @@ inline void calculate_reduce_max_min_uint16() {
         }
 
         // Load the partial max/min (top 4 rows) of the two vertically adjacent faces into LREG0-3.
-        TT_SFPLOAD_EXT<clear_high_bits>(p_sfpu::LREG0, INSTRUCTION_MODE, ADDR_MOD_7, top_face_addr);
-        TT_SFPLOAD_EXT<clear_high_bits>(p_sfpu::LREG1, INSTRUCTION_MODE, ADDR_MOD_7, bottom_face_addr);
-        TT_SFPLOAD_EXT<clear_high_bits>(p_sfpu::LREG2, INSTRUCTION_MODE, ADDR_MOD_7, top_face_addr + ODD_COLUMNS);
-        TT_SFPLOAD_EXT<clear_high_bits>(p_sfpu::LREG3, INSTRUCTION_MODE, ADDR_MOD_7, bottom_face_addr + ODD_COLUMNS);
+        load_and_clear_high_bits<clear_high_bits>(p_sfpu::LREG0, INSTRUCTION_MODE, ADDR_MOD_7, top_face_addr);
+        load_and_clear_high_bits<clear_high_bits>(p_sfpu::LREG1, INSTRUCTION_MODE, ADDR_MOD_7, bottom_face_addr);
+        load_and_clear_high_bits<clear_high_bits>(
+            p_sfpu::LREG2, INSTRUCTION_MODE, ADDR_MOD_7, top_face_addr + ODD_COLUMNS);
+        load_and_clear_high_bits<clear_high_bits>(
+            p_sfpu::LREG3, INSTRUCTION_MODE, ADDR_MOD_7, bottom_face_addr + ODD_COLUMNS);
 
         // Move into LREG4-7 for the transpose + cross-row reduction.
         TTI_SFPMOV(0, p_sfpu::LREG0, p_sfpu::LREG4, 0);

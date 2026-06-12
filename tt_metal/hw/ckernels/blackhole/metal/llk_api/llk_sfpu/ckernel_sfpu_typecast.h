@@ -19,6 +19,16 @@ using namespace sfpi;
 namespace ckernel {
 namespace sfpu {
 
+// Mask that keeps the low 16 bits (the UInt16 value) of a 32-bit dest word and clears the garbage high bits.
+constexpr std::uint16_t UINT16_LOW_MASK = 0xFFFF;
+
+// SFPSTORE mode that swaps the high and low 16 bits before writing, so a value computed in the low 16 bits
+// lands in the high 16 bits where the packer reads UInt16 out of a 32-bit dest word.
+constexpr std::uint32_t SFPSTORE_MODE_SWAP_HI_LO16 = 9;
+
+// SFPGT mod1 selector that sets the destination to all-ones (-1) when the comparison is true.
+constexpr std::uint32_t SFPGT_MOD1_SET_ALL_ONES = 8;
+
 template <bool APPROXIMATION_MODE, int ITERATIONS>
 inline void calculate_typecast_fp32_to_uint16() {
 #ifdef DISABLE_SFPLOADMACRO
@@ -413,9 +423,9 @@ inline void calculate_typecast_uint32_to_uint16() {
         TTI_SFPLOAD(p_sfpu::LREG0, InstrModLoadStore::INT32, ADDR_MOD_7, 0);
         TTI_SFPMOV(0, p_sfpu::LREG0, p_sfpu::LREG1, 0);
         TTI_SFPSHFT((-16) & 0xFFF, 0, p_sfpu::LREG0, 1);
-        TTI_SFPGT(0, p_sfpu::LCONST_0, p_sfpu::LREG0, 8);  // Set LREG0 = -1 if greater than 0
-        TTI_SFPOR(0, p_sfpu::LREG0, p_sfpu::LREG1, 0);     // Leaves garbage in high bits, but packer will ignore it
-        TTI_SFPSTORE(p_sfpu::LREG1, 9, ADDR_MOD_6, 0);     // Swap hi and low 16 before write
+        TTI_SFPGT(0, p_sfpu::LCONST_0, p_sfpu::LREG0, SFPGT_MOD1_SET_ALL_ONES);  // Set LREG0 = -1 if greater than 0
+        TTI_SFPOR(0, p_sfpu::LREG0, p_sfpu::LREG1, 0);  // Leaves garbage in high bits, but packer will ignore it
+        TTI_SFPSTORE(p_sfpu::LREG1, SFPSTORE_MODE_SWAP_HI_LO16, ADDR_MOD_6, 0);  // Swap hi and low 16 before write
     }
 }
 
@@ -516,7 +526,7 @@ inline void init_typecast_fp32_to_fp16b() {
 
 template <bool APPROXIMATION_MODE>
 inline void init_typecast_uint16_to_uint32() {
-    TTI_SFPLOADI(p_sfpu::LREG1, sfpi::SFPLOADI_MOD0_USHORT, 0xFFFF);
+    TTI_SFPLOADI(p_sfpu::LREG1, sfpi::SFPLOADI_MOD0_USHORT, UINT16_LOW_MASK);
 }
 
 template <bool APPROXIMATION_MODE>
@@ -655,7 +665,7 @@ inline void init_typecast_int32_to_fp16b() {
 
 template <bool APPROXIMATION_MODE>
 inline void init_typecast_uint16_to_fp32() {
-    TTI_SFPLOADI(p_sfpu::LREG1, sfpi::SFPLOADI_MOD0_USHORT, 0xFFFF);
+    TTI_SFPLOADI(p_sfpu::LREG1, sfpi::SFPLOADI_MOD0_USHORT, UINT16_LOW_MASK);
 }
 
 template <bool APPROXIMATION_MODE>
@@ -790,12 +800,9 @@ template <bool APPROXIMATION_MODE, int ITERATIONS, bool u16 = false>
 inline void calculate_typecast_uint_to_uint8() {
 #pragma GCC unroll 8
     for (int d = 0; d < ITERATIONS; ++d) {
-        if constexpr (u16) {
-            TTI_SFPLOAD(p_sfpu::LREG0, InstrModLoadStore::INT32, ADDR_MOD_7, 0);
-            TTI_SFPAND(0, p_sfpu::LREG13, p_sfpu::LREG0, 0);
-        } else {
-            TTI_SFPLOAD(p_sfpu::LREG0, InstrModLoadStore::INT32, ADDR_MOD_7, 0);
-        }
+        // No high-bit masking is needed for UInt16 input: the final &0xFF below isolates the low byte
+        // regardless of any garbage in the high bits, so a plain INT32 load is sufficient for all inputs.
+        TTI_SFPLOAD(p_sfpu::LREG0, InstrModLoadStore::INT32, ADDR_MOD_7, 0);
         TTI_SFPIADD(256, p_sfpu::LREG0, p_sfpu::LREG0, sfpi::SFPIADD_MOD1_ARG_IMM | sfpi::SFPIADD_MOD1_CC_NONE);
         TTI_SFPAND(0, p_sfpu::LREG12, p_sfpu::LREG0, 0);
         TTI_SFPSTORE(p_sfpu::LREG0, InstrModLoadStore::INT32, ADDR_MOD_6, 0);
@@ -810,7 +817,6 @@ inline void init_typecast_fp32_to_uint8() {
 template <bool APPROXIMATION_MODE>
 inline void init_typecast_uint_to_uint8() {
     sfpi::vConstIntPrgm0 = 0xFF;
-    sfpi::vConstIntPrgm1 = 0x0000FFFF;
 }
 
 }  // namespace sfpu

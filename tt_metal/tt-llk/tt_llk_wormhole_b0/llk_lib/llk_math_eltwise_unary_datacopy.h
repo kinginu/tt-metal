@@ -219,11 +219,12 @@ inline void _llk_math_eltwise_unary_datacopy_(const std::uint32_t dst_index, con
 
         if constexpr (is_fp32_dest_acc_en && src_b_bcast_type != BroadcastType::NONE)
         {
-            // Undo format switching option
+            // Undo format switching option: clear the override and zero-flag-disable bits set above so the
+            // implied SrcA format and default zero-flag behavior are restored (matches the Blackhole path).
             if (dst_format == to_underlying(DataFormat::UInt16))
             {
-                cfg_reg_rmw_tensix<ALU_FORMAT_SPEC_REG_SrcA_override_RMW>(1);
-                cfg_reg_rmw_tensix<ALU_ACC_CTRL_Zero_Flag_disabled_src_RMW>(1);
+                cfg_reg_rmw_tensix<ALU_FORMAT_SPEC_REG_SrcA_override_RMW>(0);
+                cfg_reg_rmw_tensix<ALU_ACC_CTRL_Zero_Flag_disabled_src_RMW>(0);
             }
         }
 

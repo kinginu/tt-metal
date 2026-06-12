@@ -215,12 +215,21 @@ def test_sfpu_reduce(
     )
 
     # STIMULI GENERATION
-    src_A = torch.randint(
-        low=min_value,
-        high=max_value,
-        size=(tile_cnt * ELEMENTS_PER_TILE,),
-        dtype=torch_format,
-    )
+    stimuli_size = (tile_cnt * ELEMENTS_PER_TILE,)
+    if formats.input_format.is_integer():
+        src_A = torch.randint(
+            low=min_value,
+            high=max_value,
+            size=stimuli_size,
+            dtype=torch_format,
+        )
+    else:
+        # Float formats need real fractional values, not integer-valued floats, so the
+        # float accumulation/rounding paths are actually exercised (randint would only
+        # ever produce whole numbers like 42.0).
+        src_A = torch.empty(stimuli_size, dtype=torch_format).uniform_(
+            min_value, max_value
+        )
     src_B = torch.zeros_like(src_A)
 
     # Max Reduction can do block and single tile reduction whereas Sum/Avg only do single tile reduction, convert Sum/Avg golden to do block reduction by retilizing input to src_A
