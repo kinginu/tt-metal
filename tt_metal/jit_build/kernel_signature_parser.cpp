@@ -46,10 +46,14 @@ std::string trim(const std::string& s) {
     return s.substr(b, e - b);
 }
 
-// Step 1: return a copy of the source with comments and string/char literals and preprocessor
-// directive lines replaced by spaces (newlines preserved). This keeps byte offsets and the
-// structural punctuation intact while ensuring the marker / signature scan never trips over a
-// TT_KERNEL inside a comment, a string, or the `#define TT_KERNEL ...` line.
+// Step 1: return a copy of the source with comments, string/char literals, and preprocessor
+// directive lines blanked out to spaces, so the marker / signature scan never trips over a
+// TT_KERNEL inside a comment, a string, or the `#define TT_KERNEL ...` line. Byte offsets are
+// preserved exactly (the copy is the same length and is never inserted into), so positions map
+// 1:1 onto the source. Most newlines survive, but not in line-continuation cases (`\<newline>`
+// in a preprocessor line, or a `\`-escape in a string/char literal), so the result is not
+// line-number-faithful — which is fine: the scan keys off byte offsets and structural
+// punctuation, not line numbers.
 std::string strip_noise(const std::string& s) {
     std::string out(s.size(), ' ');
     enum class St { Normal, LineComment, BlockComment, String, Char, Preproc };
@@ -88,12 +92,16 @@ std::string strip_noise(const std::string& s) {
                 }
                 break;
             case St::LineComment:
-                if (c == '\n') {
+                if (c == '\\' && nx == '\n') {
+                    i += 2;  // line continuation: the // comment continues onto the next line
+                } else if (c == '\n') {
                     out[i] = '\n';
                     at_line_start = true;
                     st = St::Normal;
+                    ++i;
+                } else {
+                    ++i;
                 }
-                ++i;
                 break;
             case St::BlockComment:
                 if (c == '*' && nx == '/') {
