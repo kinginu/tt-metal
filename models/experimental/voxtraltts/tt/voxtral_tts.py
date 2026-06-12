@@ -683,7 +683,7 @@ class VoxtralTTSPipeline:
                 generated_codes.append(audio_codes[0].detach().cpu())
                 if first_frame_s is None:
                     first_frame_s = time.perf_counter() - _t_entry
-            if not fixed_step_count and int(audio_codes[0, 0].item()) == self.end_audio_id:
+            if audio_codes is not None and not fixed_step_count and int(audio_codes[0, 0].item()) == self.end_audio_id:
                 if next_mm_embed_tt is not None and next_mm_embed_tt.is_allocated():
                     ttnn.deallocate(next_mm_embed_tt)
                 break
