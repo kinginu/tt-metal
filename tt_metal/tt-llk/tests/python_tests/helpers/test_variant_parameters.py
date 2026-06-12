@@ -141,6 +141,21 @@ class SFPU_INT_OP(TemplateParameter):
         return ""
 
 
+@dataclass
+class SFPU_BINARY_OP(TemplateParameter):
+    """Select the consolidated Quasar binary-SFPU op at compile time.
+
+    Emits ``constexpr QuasarBinaryOp SFPU_BINARY_OP = QuasarBinaryOp::<op>;``,
+    consumed by ``sfpu_binary_operations_quasar.h``. ``op`` is one of:
+    AddInt, MulInt, GtInt, LtInt, LeInt, GeInt, Mul, Div, Max, Min.
+    """
+
+    op: str = "AddInt"
+
+    def convert_to_cpp(self) -> str:
+        return f"constexpr QuasarBinaryOp SFPU_BINARY_OP = QuasarBinaryOp::{self.op};"
+
+
 def _generate_operation_constants(mathop: MathOperation) -> list[str]:
     """Generate the appropriate operation constants based on the math operation type."""
     constants = []
