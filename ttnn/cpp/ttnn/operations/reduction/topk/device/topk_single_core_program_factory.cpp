@@ -34,7 +34,6 @@ ttnn::device_operation::ProgramArtifacts TopKDeviceOperation::TopKSingleCoreProg
     const DFBSpecName OUTPUT_IND{"output_ind"};
 
     const TensorParamName INPUT_TENSOR{"input"};
-    const TensorParamName INDICES_TENSOR{"indices"};
     const TensorParamName VALUE_TENSOR{"value"};
     const TensorParamName INDEX_TENSOR{"index"};
 
