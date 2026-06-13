@@ -37,18 +37,17 @@ def _virt(device, lx, ly):
 KERNEL_DIR = "tests/ttnn/unit_tests/kernel_lib/kernels"
 
 
-def _defines(staging_counter, linked):
+def _defines(staging_counter):
     return [
         ("STAGING_COUNTER", str(staging_counter)),
-        ("LINKED", str(linked)),
     ]
 
 
-# (name, staging_counter, linked)
+# (name, staging_counter)  — LINK is no longer a knob (always linked), so the old "flag_unlinked"
+# variant is gone (it would be identical to flag_linked).
 VARIANTS = {
-    "flag_linked": (0, 1),  # canonical clean-spine path: Flag + linked pair + flush
-    "flag_unlinked": (0, 0),  # F4 unlinked fallback (barrier-between)
-    "counter": (1, 0),  # Staging::Counter knob (atomic-barrier fence)
+    "flag_linked": (0,),  # canonical clean-spine path: Flag + linked pair + flush
+    "counter": (1,),  # Staging::Counter knob (atomic-barrier fence)
 }
 
 
@@ -60,7 +59,7 @@ def _run_pipe(device, variant, recv_rect, sender_logical, payload_tiles, n_iters
     the per-NoC corner swap (the old verbatim-passthrough would mis-encode the rect on NoC1)."""
     (rx0, ry0), (rx1, ry1) = recv_rect
     sx, sy = sender_logical
-    stage_c, linked = VARIANTS[variant]
+    (stage_c,) = VARIANTS[variant]
     # one reader + one writer; swap which side is which so the sender lands on the requested NoC.
     sender_cfg = ttnn.WriterConfigDescriptor() if sender_noc == 1 else ttnn.ReaderConfigDescriptor()
     recv_cfg = ttnn.ReaderConfigDescriptor() if sender_noc == 1 else ttnn.WriterConfigDescriptor()
@@ -146,7 +145,7 @@ def _run_pipe(device, variant, recv_rect, sender_logical, payload_tiles, n_iters
         source_type=ttnn.KernelDescriptor.SourceType.FILE_PATH,
         core_ranges=sender_crs,
         compile_time_args=sender_ct,
-        defines=_defines(stage_c, linked),
+        defines=_defines(stage_c),
         runtime_args=sender_rt,
         config=sender_cfg,
     )
@@ -165,7 +164,7 @@ def _run_pipe(device, variant, recv_rect, sender_logical, payload_tiles, n_iters
         source_type=ttnn.KernelDescriptor.SourceType.FILE_PATH,
         core_ranges=recv_crs,
         compile_time_args=recv_ct,
-        defines=_defines(stage_c, linked),
+        defines=_defines(stage_c),
         runtime_args=recv_rt,
         config=recv_cfg,
     )
@@ -203,7 +202,7 @@ RECTS = {
     "4x2": ((0, 0), (3, 1)),
 }
 SENDER = (5, 5)
-COVERAGE_VARIANTS = ["flag_linked", "flag_unlinked", "counter"]
+COVERAGE_VARIANTS = ["flag_linked", "counter"]
 
 
 @pytest.mark.parametrize("variant", COVERAGE_VARIANTS)
@@ -268,10 +267,9 @@ def _run_f3(device, rect_len, payload_tiles, n_iters):
     page_bytes = TILE_BYTES
     payload_pages = payload_tiles
     R = rect_len
-    # sender is IN the rect; num_active_cores NEVER counts the sender (the loopback path adds
-    # its own +1), so R-1 receivers. R==1 is the degenerate self-only case (0 receivers) the
-    # Pipe must collapse to a local copy.
-    num_active_cores = R - 1
+    # sender is IN the rect; num_active_receiver_cores is the FULL count INCLUDING the sender, so
+    # R. R==1 is the degenerate self-only case (ack_count==0) the Pipe must collapse to a local copy.
+    num_active_cores = R
 
     in_shape = [1, 1, 32, 32 * payload_tiles]
     payload = torch.arange(0, payload_tiles * 1024, dtype=torch.float32).reshape(in_shape).to(torch.bfloat16)

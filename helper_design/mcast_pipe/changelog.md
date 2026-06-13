@@ -129,3 +129,118 @@ intentionally kept raw + documented.** All on BH p150a, single parametrization e
 - ~110 lines of open-coded mcast removed. Verified: in0_in1_bias_sharded + sharded_matmul
   suites, 270 tests green, 29 JIT config variants of the kernel dispatched fresh. Untested:
   fused-op (multi-device CCL).
+
+## Round 4 (2026-06-13) — API review: split objects, full recipient count, sem ids+init, noc 2.0
+
+- **Trigger (user):** four API-review bullets (`feedback.txt`). Implementation + both skills
+  (`tune-helper`, `apply-helper`) + docs fixed; **migrations deferred** pending review.
+- **API before:** one `Pipe<STAGING, PRE_HANDSHAKE, LINK>` with `send/receive/send_signal/
+  receive_signal`; ctor `Pipe(noc, McastRect, num_active_cores, Semaphore<> data_ready,
+  Semaphore<> consumed)`; receiver constructed `McastRect::single_core(sender)` + `num_active=1`.
+- **API after:** two types —
+  - `SenderPipe<STAGING, PRE_HANDSHAKE, LINK>(noc, McastRect dest, uint32_t num_active_receiver_cores,
+    uint32_t data_ready_sem_id, uint32_t consumed_sem_id)` with `send()` / `send_signal()`;
+  - `ReceiverPipe<STAGING, PRE_HANDSHAKE>(noc, uint32_t data_ready_sem_id, uint32_t consumed_sem_id)`
+    with `receive(sender_x, sender_y)` / `receive_signal()`.
+
+- **P2 — split sender/receiver into two objects.** A receiver never multicasts, so it carried a dead
+  rect + `num_active=1`. `ReceiverPipe` drops both; the sender coords it needs for its R->S ack are
+  now a `receive()` argument. `McastRect::single_core` deleted (only the receiver used it).
+  *Skills:* tune-helper Step ★ ("asymmetric faces want separate types") + Step F; apply-helper Phase 1
+  materialization invariant #2.
+- **P3 — `num_active_cores` → `num_active_receiver_cores`, now the FULL count incl. sender-if-receiver.**
+  Round 3's convention ("never counts the sender; loopback adds +1 internally") forced the caller to
+  pre-subtract. New: the caller states the whole recipient set; the SenderPipe derives
+  `ack_count = N - (sender_in_rect?1:0)` and `mcast_dests = loopback ? N : ack_count`. Degenerate guard
+  is now `ack_count == 0`. Net mapping: old `num_active_cores` == new `ack_count`; old `+1` loopback ==
+  new `N`. *Skills:* tune-helper Step ★ ("count statable from caller topology alone"); apply-helper
+  Phase 1 invariant #3.
+- **P4 — ctors take semaphore IDs and own init.** Was: caller passed pre-built `Semaphore<>` and (e.g.
+  toy/matmul) pre-set VALID. Now: ctors take `uint32_t` ids, construct `Semaphore<>` internally, and
+  init the cell THIS side waits on (SenderPipe: `consumed = 0` under PRE_HANDSHAKE; ReceiverPipe:
+  `data_ready = INVALID` under Staging::Flag). The other side's cell is left to that side's ctor — no
+  cross-core init race. Host `CreateSemaphore` still allocates the ids. *Skills:* tune-helper Step ★/F;
+  apply-helper Phase 1 invariant #4.
+  - **Follow-up (user review):** the SenderPipe ctor also folds in the sender's local data-ready
+    pre-set — a 6th `initial_ready` ctor arg, **default `VALID`** (the dominant pattern: 5/6 migrated
+    data senders did `<flag_sem>.set(VALID)` before the loop). A signal sender that starts INVALID
+    (sharded-LN phase-1) passes `initial_ready = INVALID`. Migrating call sites drop their manual
+    pre-loop `set(VALID)` line. No-op for Staging::Counter.
+- **P5 (user review) — drop the `LINK` template param; always link.** Census of all 16 `Pipe<>`
+  instantiations: **none** override `LINK` (the two non-default ones set only `PRE_HANDSHAKE=false`).
+  Per the helper's own "single-path is the default; a dual-path must earn its place" rule, the
+  `LINK=false` (unlinked + barrier-between) arm is removed and the data mcast is always issued
+  `linked=true` (flag terminates the chain with `linked=false`). `SenderPipe<STAGING, PRE_HANDSHAKE>`
+  is now 2 template params. *Skills:* tune-helper Step E.4 + Step F; apply-helper Phase 1 invariant #5.
+  - **The supposed unlinked consumer (sdpa read_k) doesn't actually need unlinked — corrected finding.**
+    The `LINK=false` arm was justified in `proposed_helpers.md`/`style_bakeoff.md` by *"a barrier is
+    structurally required between data and flag, e.g. sdpa read_k."* On inspection that is **wrong**:
+    - The kernel is `sdpa_decode/device/kernels/dataflow/dataflow_common.hpp::read_k`, the `do_mcast`
+      sender branch (~L631–653). It does `noc_async_write_multicast(..., /*linked=*/false)` → **full
+      `noc_async_write_barrier()`** → `noc_semaphore_set_multicast(...)` → barrier. That is the slow,
+      conservative pattern: it waits for the data to fully ACK before signaling.
+    - There is no structural obstacle to linking. Data + flag target the **same vertical column**
+      (`get_noc_multicast_addr(mcast_x, y0, mcast_x, y1, ...)`) on the same NoC/VC; same-VC FIFO order
+      (INV4) already gives the receiver data-before-flag, so the full barrier is overkill.
+    - **sdpa's OWN `chain_link.hpp` proves it** — for the same K/V chunk broadcast it does exactly the
+      helper's pattern: `noc_async_write_multicast(..., /*linked=*/true)` → `noc_semaphore_set_multicast`
+      → `noc_async_writes_flushed()` (chain_link.hpp L231–233). And the matmul/conv senders link the
+      identical data-write→sem-set sequence.
+    - So `read_k` is a **`refactor`** (census tags it exactly that), not a `defer`, and it would *gain*
+      the −36% linked win — it never needed `LINK=false`. The arm had **no genuine consumer at all**,
+      which is the strongest possible reason to delete the knob. (Caveat: this is a code-reading
+      conclusion; the rigorous confirmation is to migrate read_k to the linked helper and run the
+      sdpa_decode suite. If some *future* kernel must genuinely fence between data and flag, re-add the
+      unlinked arm as a refinement then.)
+- **P6 (user review) — push compile-time, core-uniform ctor args to TEMPLATE params.** Audited each
+  `uint32_t` against the kernels (matmul `reader_bmm_tile_layout_in0_sender_padding.cpp` is the witness):
+  - **Templatable (compile-time + identical across all cores running the binary):** `num_active`
+    (`get_compile_time_arg_val(17)`), the two sem ids (`get_compile_time_arg_val(15/16)`), and
+    `initial_ready` (a literal). P3 also made `num_active` core-uniform (the in-grid/out-of-grid ±1 is
+    now derived internally), so it's safe to bake in. → moved to template params.
+  - **Hard-runtime (must stay):** `McastRect` coords — `get_arg_val` in matmul because each row-sender
+    in a 2D grid targets a *different* rect under one compiled binary (per-core variation); plus
+    they're device-resolved virtual coords. `send(src,dst,size)` — CB pointers, per-iteration.
+    `receive(sender_x,sender_y)` — varies per receiver (2D) and rotates per block (R6). → stay runtime.
+  - **API after:**
+    `SenderPipe<NUM_ACTIVE_RECEIVER_CORES, DATA_READY_SEM_ID, CONSUMED_SEM_ID, STAGING=Flag,
+     PRE_HANDSHAKE=true, INITIAL_READY=VALID>(noc, dest)` and
+    `ReceiverPipe<DATA_READY_SEM_ID, CONSUMED_SEM_ID, STAGING=Flag, PRE_HANDSHAKE=true>(noc)`.
+    The ReceiverPipe ctor now takes only `noc`. Perf upside is marginal (`get_semaphore(ID)` folds to a
+    constant address, but `ack_count` stays runtime via the `sender_in_rect_()` membership check); the
+    real win is type honesty — the host cannot pass a per-core-varying value where a uniform one is
+    required. *Skills:* tune-helper Step ★ (arg-classification rule); apply-helper Phase 1 invariant #6.
+  - **Migration impact:** every call site moves these values from ctor args to template args — the
+    sem ids/count/initial_ready (already `get_compile_time_arg_val` in the kernels) become template
+    args; only the rect stays a ctor arg.
+
+### Round 4 — Tier 0 migration (unit test) + P4 correctness fix
+
+- Migrated the 3 unit-test kernels (`pipe_sender/receiver/f3_sender.cpp`) + `test_mcast_pipe.py` to the
+  `SenderPipe`/`ReceiverPipe` template API; dropped the `flag_unlinked`/`LINKED` axis (LINK gone);
+  F3 count `R-1` → `R` (P3: now includes the sender).
+- **P4 BUG found by the pre_handshake hang (4/39 failing) and fixed:** the SenderPipe ctor's
+  `consumed_.set(0)` **raced** with receivers' `consumed_.up()` — a receiver acks before the sender's
+  ctor runs, the `set(0)` clobbers the ack, the sender's `wait(ack_count)` hangs forever. Root cause:
+  a counter that **remote cores increment** has no happens-before with the waiting side's ctor, so it
+  CANNOT be kernel-initialized — its initial 0 must come from host `CreateSemaphore(..., 0)` (every
+  call site already does this). Fix: removed the `consumed` ctor init; kept only the race-free local
+  inits (receiver's own `data_ready`, sender's own broadcast `INITIAL_READY`). Corrected the P4 lesson
+  in the header + both skills. **Unit suite 39/39 PASS** (BH p150a).
+- **P1 — noc 2.0 only; no raw mcast free functions.** Round 3 still called raw
+  `noc_async_write_multicast` / `_loopback_src` + open-coded `::get_noc_multicast_addr`, and a raw
+  `noc_async_read`/`get_noc_addr` in the self-copy — despite the docstring claiming "object API." Now
+  the data mcast goes through `Noc::async_write_multicast<McastMode>` with `UnicastEndpoint` +
+  `MulticastEndpoint`, and the self-copy through `Noc::async_read`. Flag mcast was already on
+  `Semaphore<>::set_multicast` / `inc_multicast`. *Skills:* apply-helper Phase 1 invariant #1
+  ("object API only; a missing overload is a gap to flag, not a license to drop to raw"); tune-helper
+  Step F implementation-contract commitment.
+
+- **Migration impact (DEFERRED — to migrate after review):** every call site that used `Pipe<>` must
+  move to `SenderPipe`/`ReceiverPipe`, pass sem ids instead of `Semaphore<>` objects, drop manual sem
+  init, and pass the full recipient count. Affected: 13 committed kernels (matmul ×5 incl. R6,
+  conv ×4, groupnorm ×2, topk, layernorm), 2 untracked toy_matmul kernels, and the 3 unit-test
+  kernels (`pipe_sender.cpp`, `pipe_receiver.cpp`, `pipe_f3_sender.cpp`) + `test_mcast_pipe.py`.
+  Until migrated, those kernels reference the removed `Pipe` type and will fail to JIT-compile.
+- **Verification:** none yet on device (header-only change, no rebuild; kernels compile at JIT/test
+  time during migration). Unit gate + mapped-test re-run is the first migration step.
