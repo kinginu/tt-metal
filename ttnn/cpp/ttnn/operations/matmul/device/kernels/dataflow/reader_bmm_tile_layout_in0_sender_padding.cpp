@@ -152,27 +152,25 @@ void kernel_main() {
     const auto s_sparsity = TensorAccessor(sparsity_args, sparsity_addr);
 
 #ifndef SKIP_MCAST
-    // Set ur local VALID value, to be mcasted to destinations flag address after the data has been mcasted
-    receiver_sem.set(VALID);
-    // local address that will be atomically incremented by mcast receivers, to know when all receivers are ready
-    // to receive the mcast
-
     // mcast_pipe: the in0 block data-mcast + handshake is driven by a two-sided Pipe.
     //   data_ready = receiver_sem (S->R level flag, VALID/INVALID), consumed = sender_sem (R->S counter).
-    //   The sender sits in the box corner but is NOT a recipient (num_dests < area) so the Pipe
-    //   infers EXCLUDE_SRC — it must not self-overwrite its own in0 source. LINK=true: data;flag + flush
-    //   (matches the original linked data mcast + ARCH_BLACKHOLE flush). PRE_HANDSHAKE=true: dest L1
-    //   is the receivers' reused in0 CB slot, so the R->S "consumed" wait gates each block.
-    dataflow_kernel_lib::Pipe<> in0_pipe(
+    //   The sender sits in the box corner and IS one of the recipients (it consumes its own copy), but
+    //   src == dst so the Pipe infers EXCLUDE_SRC — it must not self-overwrite its own in0 source. The
+    //   linked data;flag + flush is always-on (F4/F1). PRE_HANDSHAKE=true: dest L1 is the receivers'
+    //   reused in0 CB slot, so the R->S "consumed" wait gates each block.
+    //   NUM_ACTIVE_RECEIVER_CORES is the FULL recipient count INCLUDING the in-box sender, so it is the
+    //   old ACK count (in0_mcast_num_dests) + 1. Done as constexpr in-kernel so the host factory is
+    //   unchanged (kernels are JIT-compiled). Sem ids + count are template params; the sender's local
+    //   data-ready VALID pre-set is now owned by the ctor (INITIAL_READY defaults to VALID).
+    constexpr uint32_t in0_data_ready_sem_id = get_compile_time_arg_val(16);
+    constexpr uint32_t in0_consumed_sem_id = get_compile_time_arg_val(15);
+    dataflow_kernel_lib::SenderPipe<in0_mcast_num_dests + 1, in0_data_ready_sem_id, in0_consumed_sem_id> in0_pipe(
         noc,
         dataflow_kernel_lib::McastRect{
             in0_mcast_dest_noc_start_x,
             in0_mcast_dest_noc_start_y,
             in0_mcast_dest_noc_end_x,
-            in0_mcast_dest_noc_end_y},  // area() = in0_mcast_num_cores (the full mcast grid)
-        in0_mcast_num_dests,            // active-core ACK count (may be < num_cores when cores-without-work exist)
-        receiver_sem,                   // data ready (S->R level flag)
-        sender_sem);                    // consumed (R->S counter)
+            in0_mcast_dest_noc_end_y});
 
 #ifdef IN0_SHARDED
     uint32_t in0_start_address = cb_in0.get_write_ptr();
