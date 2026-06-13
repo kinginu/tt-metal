@@ -267,3 +267,22 @@ intentionally kept raw + documented.** All on BH p150a, single parametrization e
   Until migrated, those kernels reference the removed `Pipe` type and will fail to JIT-compile.
 - **Verification:** none yet on device (header-only change, no rebuild; kernels compile at JIT/test
   time during migration). Unit gate + mapped-test re-run is the first migration step.
+
+### Round 4 — Tier 2 COMPLETE (all 13 production kernels migrated + verified, BH p150a)
+
+- **matmul (5):** in0/in1 sender+receiver + R6 block-sharded. unit 39/39, toy 4/4, 1D mapped + 2D 56/56.
+- **topk (1):** `reader_final_topk` send_signal. `test_topk` W=8192 PASS.
+- **layernorm (1):** `reader_mcast_sender_unary_sharded_ln` send_signal, `INITIAL_READY=INVALID`.
+  `test_layer_norm_sharded_single_stage` welford PASS.
+- **groupnorm (2):** `reader_mcast_receiver` + `welford_reader_mcast_receiver` (v2 block-sharded) PASS.
+- **conv (4):** width-sharded activation sender + the 3 WEIGHTS kernels (1D recv, 2D send/recv). The
+  weights kernels read sem ids from RUNTIME args — P6 (template sem ids) didn't hold, so (user
+  decision) the conv2d sharded factory was edited to APPEND the 2 weights sem ids + the 2D sender
+  recipient count as compile-time args to `writer_compile_time_args` (no CT-index shift; runtime args
+  left in place). Required a `build_metal.sh` rebuild. `test_conv_features` HS + BS PASS.
+- **Two API-reality findings resolved this tier:** (1) a sender kernel SHARED across topologies with
+  differing in-rect-ness (matmul in0, 1D vs 2D) → reset P3 to recipient-count semantics so the same CT
+  count works for both with no host edit; (2) RUNTIME-sourced sem ids (conv weights) → host-promote to
+  compile-time. P3/P6 in the helper docstring + tune/apply skills carry these caveats.
+- **Status: Round 4 migration COMPLETE.** 13 production + 2 toy_matmul + 3 unit kernels on the new
+  `SenderPipe`/`ReceiverPipe` API; no old `Pipe<>` / `McastRect::single_core` usage remains.
