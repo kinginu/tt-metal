@@ -214,6 +214,29 @@ intentionally kept raw + documented.** All on BH p150a, single parametrization e
     sem ids/count/initial_ready (already `get_compile_time_arg_val` in the kernels) become template
     args; only the rect stays a ctor arg.
 
+### Round 4 — Tier 2 matmul + P3 RESET to recipient-count semantics (user review)
+
+- **P3 conflict found at matmul:** the shared `reader_bmm_tile_layout_in0_sender_padding.cpp` is used
+  by the 1D factory (sender IN rect) and the 2D factory (sender OUT of rect). P3-as-implemented had
+  the helper *subtract* 1 (runtime `sender_in_rect`) and the caller pass the *rect-population* count —
+  but that compile-time count differs per topology (1D needs `num_dests+1`, 2D needs `num_dests`) and a
+  shared kernel has no compile-time discriminator. Bisection confirmed no single constexpr works.
+- **Decision (user): RESET P3 to recipient-count semantics** (the round-3 direction):
+  `NUM_ACTIVE_RECEIVER_CORES` = the RECIPIENT count = EXCLUDE_SRC `num_dests` = ACK count — the value
+  every factory ALREADY computes. The helper no longer subtracts; it ADDS +1 only for INCLUDE
+  loopback. The in0 sender now passes `in0_mcast_num_dests` verbatim and is correct for BOTH 1D and 2D
+  with **zero host-factory edits**. (Softens P3's "caller passes full count incl. sender" wording, but
+  keeps "helper decides num_dests per mode".) Helper §send/send_signal + docstring updated; tune/apply
+  skills' P3 lesson should be read with this correction.
+- **Migrated matmul (5):** in0 sender, in1 sender(+bias), in0 receiver, in1 receiver, R6 role-flip
+  block-sharded (persistent SenderPipe + per-round ReceiverPipe, rotating `receive(sx,sy)`).
+  Verified BH p150a: unit 39/39, toy 4/4, matmul 1D mapped + 2D multiple-output 56/56 (incl. R6).
+- **Migration rule for the remaining families (conv/gn/topk/ln):** pass the kernel's existing
+  recipient count (the old `num_active` ctor value = factory `num_dests`) **verbatim** as the template
+  `NUM_ACTIVE_RECEIVER_CORES` — no ±1. Sem ids → template; `receive(sx,sy)`; drop the manual pre-loop
+  `set(VALID)` (ctor owns it via INITIAL_READY; a signal sender that pre-set INVALID uses
+  `INITIAL_READY=INVALID`).
+
 ### Round 4 — Tier 0 migration (unit test) + P4 correctness fix
 
 - Migrated the 3 unit-test kernels (`pipe_sender/receiver/f3_sender.cpp`) + `test_mcast_pipe.py` to the
