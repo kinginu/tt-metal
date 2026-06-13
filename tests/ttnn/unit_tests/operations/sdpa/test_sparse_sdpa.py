@@ -116,20 +116,32 @@ def test_sparse_sdpa_multitoken(device, TOPK, kc):
 # ---- Perf-only (no golden; full-size golden gather is ~GBs). Profile with:
 #      python -m tracy -p -r -v -m pytest <thisfile>::test_sparse_sdpa_perf
 #      then read "DEVICE KERNEL DURATION [ns]" for SparseSDPAOperation. ----
+# nv (valid keys/token) patterns. Chunk-skip benefit is sparsity-dependent, so sweep it.
+_NV = {
+    "dense": lambda s, T, K: K,  # all TOPK valid (no skip) -> worst case, proves no regression
+    "half": lambda s, T, K: K // 2,
+    "causal": lambda s, T, K: min(s + 1, K),  # realistic prefill: position p has p+1 candidates
+    "sparse": lambda s, T, K: 256,
+    "mixed": lambda s, T, K: 1 + (s * 7) % K,  # earlier arbitrary distribution (for before/after compare)
+}
+
+
 @run_for_blackhole()
 @pytest.mark.parametrize(
-    "S,T,TOPK,kc",
+    "S,T,TOPK,kc,nv",
     [
-        (220, 4096, 512, 128),
-        (220, 4096, 2048, 128),
-        (220, 8192, 2048, 256),
-        (640, 56320, 2048, 128),  # production shape (Q[32,640,576], KV[56320,576], idx[640,2048])
-        (640, 56320, 2048, 256),
+        (640, 56320, 2048, 256, "dense"),  # production shape (Q[32,640,576], KV[56320,576], idx[640,2048])
+        (640, 56320, 2048, 256, "half"),
+        (640, 56320, 2048, 256, "causal"),
+        (640, 56320, 2048, 256, "sparse"),
+        (640, 56320, 2048, 256, "mixed"),
+        (110, 4096, 2048, 256, "dense"),  # 1 token/core, 8 chunks -> clean per-zone profiling
     ],
-    ids=["topk512-kc128", "topk2048-kc128", "topk2048-kc256", "prod-kc128", "prod-kc256"],
+    ids=["prod-dense", "prod-half", "prod-causal", "prod-sparse", "prod-mixed", "zone1tok"],
 )
-def test_sparse_sdpa_perf(device, S, T, TOPK, kc):
+def test_sparse_sdpa_perf(device, S, T, TOPK, kc, nv):
     H = 32
-    q, kv, indices = _make_inputs(H, S, T, TOPK, lambda s: 1 + (s * 7) % TOPK)
+    nv_fn = _NV[nv]
+    q, kv, indices = _make_inputs(H, S, T, TOPK, lambda s: nv_fn(s, T, TOPK))
     out, _ = _run_op(q, kv, indices, device, kc)  # no golden; correctness covered by PCC tests
     assert tuple(out.shape) == (1, H, S, V_DIM)

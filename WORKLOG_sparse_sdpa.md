@@ -38,3 +38,27 @@ Rationale: separate Kᵀ/V buffers ⇒ standard `matmul_blocks` (pops its in1 fi
   - **Per-token CB hygiene** (matters for >1 token/core, i.e. S>num_cores; num_cores=110 here): everything must be empty at token end. `matmul_blocks` only pops in1, so `CB_QK_IM` popped after PV and **`CB_Q_IN` popped after the chunk loop** (Q is reused across chunks). The final running max is never consumed by a combine → explicit `cb_pop_front(max_prev)` at token end. `CB_SCALE` is intentionally persistent (reduce scaler, never popped). Verified by `test_sparse_sdpa_multitoken` (S=256>110 ⇒ 2–3 tok/core) at 1/2/4 chunks.
   - CB set (20): +ping-pong `CB_{MAX,SUM,OUT}_{A,B}`, `CB_CORR`; `CB_OUT_{A,B}` single-buffered (=vDHt tiles) for L1 acc. Writer `CB_OUT_RM` 13→18, reader `CB_IDX` 14→19.
 - **Stage 1 acceptance met.** Remaining (future): Stage 2 = H=16 / `{16,32}` tiles (LLK uplift per PLAN); perf path (fuse sub_exp partial-sum, streaming overlap); larger TOPK sweep up to 2048.
+
+## Perf (Stage 1 baseline + opts)
+Method: `python -m tracy -p -r -v -m pytest <file>::test_sparse_sdpa_perf -k <id>`. Read `DEVICE KERNEL DURATION [ns]` (SparseSDPAOperation) from `generated/profiler/reports/*/ops_perf_results_*.csv`. Per-zone: `DeviceZoneScopedN` in reader (between reserve_back/push_back → productive time only) + compute; parse `generated/profiler/.logs/profile_log_device.csv` (cols: zone=10, phase=11 ZONE_START/END, cycles=5; 1350 MHz). 125-scope/core limit → profile a 1-token/core shape (S=110).
+- **Production shape** Q[32,640,576], KV[56320,576], idx[640,2048], TOPK=2048: **baseline 11.12 ms → 8.45 ms after mask opt (−24%)**. Independent of T (cache size) and k_chunk; scales with S·TOPK. S=640 on 110 cores = ceil 6 tokens/core (90 cores×6 + 20×5 → busiest bounds it).
+- **Bottleneck = reader (NCRISC), ~100% busy** (coupled RISCs all show equal KERNEL duration; the per-zone split is what localizes it). NoC check: reader already uses the **preferred NOC_0 for DRAM reads** (`ReaderConfigDescriptor{}`→`ReaderDataMovementConfig`, program.cpp:341); don't split DRAM reads to NOC_1 (non-preferred for reads).
+- **Per-token zones (1 tok/core, TOPK=2048, 8 chunks), µs/chunk:**
+  - rdr_Kchunk (indexed K gather) 141 — **now 94% of reader, the dominant cost**.
+  - rdr_mask 62 → **2.8 after opt** (build 1 row + `add_tiles_bcast_rows` row-broadcast instead of replicating 32 rows; reader writes 1 row, compute bcasts mask row 0 across query rows). cmp_tilizeMask stall 51 → 0.3.
+  - real compute (repose 8, QK-math 54, softmax 3, PV 3) ≈ 67 µs/chunk ≪ reader 145 → reader-bound by ~2×.
+- **K-gather optimizations (DONE).** Two landed, both exploiting the contiguous-sentinel-tail contract:
+  1. **Chunk-skipping.** Reader binary-searches `nv` (first sentinel = valid-key count), processes only `n_active = ceil(nv/k_chunk)` chunks; all-sentinel chunks are skipped entirely (no DRAM read, no fill, no compute). TRISC compute can't issue NoC reads, so it can't derive `nv` itself — the reader passes `n_active` via a tiny `CB_CTRL` (compute reads it with `get_tile_address(CB_CTRL,0)` + L1 deref, NOT `get_read_ptr` which is dataflow-only) and both loop the same count. Within a chunk, reads only the `valid` prefix.
+  2. **Prebuilt-zero NoC fill.** Sentinel suffix of the boundary chunk filled by NoC-copying a once-built zero K-row (`CB_ZERO`, local L1->L1 via `get_noc_addr(my_x[noc_index], my_y[noc_index], zero_l1)`) — independent copies, all in flight under the existing gather barrier — instead of a per-row scalar store loop. Offloads the fill from the RISC to the NoC.
+- **Perf after K-gather opts** (prod S=640/TOPK=2048, by sparsity `nv`):
+
+  | nv | baseline→mask→chunk-skip→+NoC-fill |
+  |---|---|
+  | mixed `1+(s*7)%K` (~½ sentinel) | 11.1 → 8.45 → 2.83 → **2.13 ms** (5.2× total) |
+  | causal `min(s+1,K)` (realistic prefill, the user's shape) | — → — → 1.64 → **0.81 ms** |
+  | dense `nv=K` (no sentinels, worst case) | **4.41 ms** (only mask-opt applies; ~340 GB/s DRAM, near the data-movement floor) |
+
+  Realistic prefill (S<TOPK ⇒ nv=position+1) lands at **0.81 ms**. Dense is the floor (pure K-gather BW). Sentinel handling is now ~free.
+- **Mask-skip (done, wall-clock-neutral).** Mask is built/tilized/added only on the last active chunk (`c==n_active-1`); earlier active chunks are fully valid (all-zero mask = no-op). Correct (22/22) but ~0 wall-clock change — the row-broadcast opt already made the mask cheap (~2.8 µs/chunk vs K-gather ~140), and the bigger savings (compute mask tilize/add) aren't on the critical path. Kept anyway: removes redundant work, no downside, helps if compute ever bottlenecks.
+- **Where time goes now:** reader is essentially pure K-gather (scattered DRAM reads of real keys). Dense (4.40 ms) ≈ DRAM-BW floor; sentinel/mask handling is ~free. Next real lever would be fewer K bytes (e.g., bf8 K-cache), which touches dtype/accuracy.
+- **Profiling note:** `DeviceZoneScopedN` zones currently in both kernels (reader rdr_Q/rdr_Kchunk/rdr_mask, compute cmp_*) for the analysis above — strip before the final perf commit (small overhead + 125-scope/core limit).

@@ -44,6 +44,8 @@ enum SparseCB : uint32_t {
     CB_OUT_IM,  // fixed pre-untilize copy of the final out [Sqt=1, vDHt]
     CB_OUT_RM,  // untilized row-major out (compute -> writer)
     CB_IDX,     // reader-internal: one token's index row (uint32)
+    CB_CTRL,    // reader -> compute: active chunk count (= ceil(valid_keys / k_chunk)) per token
+    CB_ZERO,    // reader-internal: one prebuilt zero K-row (NoC-copied over sentinel rows)
     CB_COUNT
 };
 
@@ -107,6 +109,8 @@ ProgramDescriptor SparseSDPAOperation::SparseSDPAProgramFactory::create_descript
     cb(tile_bytes, vDHt, bf);        // CB_OUT_IM : [1,vDHt] fixed pre-untilize copy
     cb(tile_bytes, vDHt, bf);        // CB_OUT_RM : untilized [32,512] block (vDHt tile-sized pages)
     cb(TOPK * 4, 1, bf);             // CB_IDX : one index row (uint32 bytes)
+    cb(16, 2, bf);                   // CB_CTRL : n_active per token (uint32; 16B aligned, double-buffered)
+    cb(q_row_bytes, 1, bf);          // CB_ZERO : one prebuilt zero K-row (576 bf16)
 
     // ---- matmul subblocks ----
     auto [qk_sh, qk_sw] = detail::determine_largest_subblock_size(Sqt, Skt, 8);
