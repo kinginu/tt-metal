@@ -10,6 +10,7 @@
 #include <tt-metalium/program_descriptors.hpp>
 #include <tt-metalium/tensor_accessor_args.hpp>
 #include <bit>
+#include <cstdlib>
 #include <map>
 #include <string>
 
@@ -117,7 +118,26 @@ ProgramDescriptor SparseSDPAOperation::SparseSDPAProgramFactory::create_descript
     auto [pv_sh, pv_sw] = detail::determine_largest_subblock_size(Sqt, vDHt, 8);
 
     // ---- compile-time args ----
-    std::vector<uint32_t> reader_ct = {H, S, T, TOPK, k_chunk, n_chunks, scale_packed};
+    // K-gather NoC trid-ring depth (bounds outstanding reads/core to fight NoC/DRAM congestion).
+    // 0 = disabled (issue-all + single barrier). Sourced from env so it can be swept via JIT recompile
+    // (no host rebuild). Clamp to [0,8] (HW trid range; trids 1..N_TRIDS, 0 reserved for untagged).
+    // Default depth-8 NoC trid-ring: bounds outstanding K reads/core to fight DRAM congestion. Depth 8 is
+    // gentle enough to be ~neutral on sparse tokens while recovering ~9% on dense (swept empirically).
+    // Env override for tuning. 0 = disabled. Clamp to [0,8] (HW trid range; trids 1..N, 0 = untagged).
+    uint32_t k_trids = 8;
+    if (const char* e = std::getenv("SPARSE_SDPA_K_TRIDS")) {
+        const int v = std::atoi(e);
+        k_trids = v < 0 ? 0 : (v > 8 ? 8 : static_cast<uint32_t>(v));
+    }
+    // Ring only for tokens with n_active >= ring_min_active (>= half the chunks). Sparse tokens desync
+    // naturally (no congestion to recover) so they skip the ring's overhead; only dense-ish tokens keep
+    // all cores synced and saturate DRAM. Default n_chunks/2 was the sweet spot across the sparsity sweep.
+    uint32_t ring_min_active = n_chunks / 2 < 1 ? 1 : n_chunks / 2;
+    if (const char* e = std::getenv("SPARSE_SDPA_RING_MIN_ACTIVE")) {
+        const int v = std::atoi(e);
+        ring_min_active = v < 1 ? 1 : static_cast<uint32_t>(v);
+    }
+    std::vector<uint32_t> reader_ct = {H, S, T, TOPK, k_chunk, n_chunks, scale_packed, k_trids, ring_min_active};
     TensorAccessorArgs(t.q.buffer()).append_to(reader_ct);
     TensorAccessorArgs(t.kv.buffer()).append_to(reader_ct);
     TensorAccessorArgs(t.indices.buffer()).append_to(reader_ct);

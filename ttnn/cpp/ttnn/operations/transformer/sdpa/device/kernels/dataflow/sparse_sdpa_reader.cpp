@@ -31,7 +31,9 @@ void kernel_main() {
     constexpr uint32_t k_chunk = get_compile_time_arg_val(4);
     constexpr uint32_t n_chunks = get_compile_time_arg_val(5);
     // arg 6 = scale_packed (used by compute, not here)
-    constexpr auto q_args = TensorAccessorArgs<7>();
+    constexpr uint32_t k_trids = get_compile_time_arg_val(7);          // NoC trid-ring depth (0 = disabled)
+    constexpr uint32_t ring_min_active = get_compile_time_arg_val(8);  // ring only if n_active >= this
+    constexpr auto q_args = TensorAccessorArgs<9>();
     constexpr auto kv_args = TensorAccessorArgs<q_args.next_compile_time_args_offset()>();
     constexpr auto idx_args = TensorAccessorArgs<kv_args.next_compile_time_args_offset()>();
 
@@ -79,7 +81,7 @@ void kernel_main() {
         cb_reserve_back(CB_Q_RM, H);
         const uint32_t qw = get_write_ptr(CB_Q_RM);
         {
-            DeviceZoneScopedN("rdr_Q");  // productive read only (excludes reserve_back backpressure)
+            DeviceZoneScopedN("rdr_Q");
             for (uint32_t h = 0; h < H; ++h) {
                 noc_async_read(q.get_noc_addr(h * S + tok), qw + h * row_bytes, row_bytes);
             }
@@ -122,15 +124,42 @@ void kernel_main() {
             const uint32_t kw = get_write_ptr(CB_K_RM);
             {
                 DeviceZoneScopedN("rdr_Kchunk");  // the per-chunk indexed K gather (dominant cost)
-                for (uint32_t j = 0; j < valid; ++j) {
-                    noc_async_read(kv.get_noc_addr(idx_ptr[base + j]), kw + j * row_bytes, row_bytes);
+                // src(j) = real key for j<valid, else the prebuilt zero row (sentinel suffix).
+                auto issue_all = [&]() {
+                    for (uint32_t j = 0; j < valid; ++j) {
+                        noc_async_read(kv.get_noc_addr(idx_ptr[base + j]), kw + j * row_bytes, row_bytes);
+                    }
+                    for (uint32_t j = valid; j < k_chunk; ++j) {
+                        noc_async_read(zero_noc, kw + j * row_bytes, row_bytes);
+                    }
+                    noc_async_read_barrier();
+                };
+                if constexpr (k_trids == 0) {
+                    issue_all();  // ring disabled
+                } else if (n_active < ring_min_active) {
+                    // Sparse token: cores desync naturally, no congestion to recover -> ring is pure
+                    // overhead. Gate it to dense-ish tokens (n_active >= ring_min_active) where cores
+                    // stay synced and saturate DRAM, so bounding outstanding reads/core actually helps.
+                    issue_all();
+                } else {
+                    // Trid ring: tag read j with trid (j % k_trids)+1; before reusing a trid, barrier on
+                    // its previous read. Bounds outstanding reads/core to k_trids -> caps aggregate NoC/DRAM
+                    // congestion across all cores. Drain the in-flight trids after the loop.
+                    for (uint32_t j = 0; j < k_chunk; ++j) {
+                        const uint32_t trid = (j % k_trids) + 1;
+                        if (j >= k_trids) {
+                            noc_async_read_barrier_with_trid(trid);  // free this slot
+                        }
+                        noc_async_read_set_trid(trid);
+                        const uint64_t src = (j < valid) ? kv.get_noc_addr(idx_ptr[base + j]) : zero_noc;
+                        noc_async_read(src, kw + j * row_bytes, row_bytes);
+                    }
+                    const uint32_t to_drain = (k_chunk < k_trids) ? k_chunk : k_trids;
+                    for (uint32_t d = 0; d < to_drain; ++d) {
+                        noc_async_read_barrier_with_trid(((k_chunk - to_drain + d) % k_trids) + 1);
+                    }
+                    noc_async_read_set_trid(0);  // restore untagged for Q/idx/mask reads
                 }
-                // sentinel suffix [valid, k_chunk): NoC-copy the prebuilt zero row into each (independent
-                // copies -> all in flight; the barrier below covers them alongside the valid-key reads)
-                for (uint32_t j = valid; j < k_chunk; ++j) {
-                    noc_async_read(zero_noc, kw + j * row_bytes, row_bytes);
-                }
-                noc_async_read_barrier();
             }
             cb_push_back(CB_K_RM, k_chunk);
 

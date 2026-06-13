@@ -135,9 +135,10 @@ _NV = {
         (640, 56320, 2048, 256, "causal"),
         (640, 56320, 2048, 256, "sparse"),
         (640, 56320, 2048, 256, "mixed"),
-        (110, 4096, 2048, 256, "dense"),  # 1 token/core, 8 chunks -> clean per-zone profiling
+        (110, 56320, 2048, 256, "dense"),  # 1 token/core, 8 chunks, real T -> representative DRAM locality
+        (8, 56320, 2048, 256, "dense"),  # 8 cores -> low DRAM contention; isolates BW headroom vs floor
     ],
-    ids=["prod-dense", "prod-half", "prod-causal", "prod-sparse", "prod-mixed", "zone1tok"],
+    ids=["prod-dense", "prod-half", "prod-causal", "prod-sparse", "prod-mixed", "zone1tok", "lowcore"],
 )
 def test_sparse_sdpa_perf(device, S, T, TOPK, kc, nv):
     H = 32
