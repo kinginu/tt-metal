@@ -145,9 +145,7 @@ def create_program_descriptor(
     # --- Core sets ---
     sender_core = ttnn.CoreCoord(0, 0)
     sender_crs = ttnn.CoreRangeSet([ttnn.CoreRange(sender_core, sender_core)])
-    all_crs = ttnn.CoreRangeSet(
-        [ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(grid_x - 1, grid_y - 1))]
-    )
+    all_crs = ttnn.CoreRangeSet([ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(grid_x - 1, grid_y - 1))])
     recv_ranges = []
     if grid_x > 1:  # rest of row 0
         recv_ranges.append(ttnn.CoreRange(ttnn.CoreCoord(1, 0), ttnn.CoreCoord(grid_x - 1, 0)))
@@ -155,10 +153,10 @@ def create_program_descriptor(
         recv_ranges.append(ttnn.CoreRange(ttnn.CoreCoord(0, 1), ttnn.CoreCoord(grid_x - 1, grid_y - 1)))
     recv_crs = ttnn.CoreRangeSet(recv_ranges)
 
-    # P3: num_active_receiver_cores is the FULL recipient count INCLUDING the sender (it sits in the
-    # broadcast box and consumes its own A copy). The SenderPipe derives mcast_dests = N-1 (EXCLUDE,
-    # src==dst) and ack_count = N-1 internally.
-    num_active_cores = num_cores
+    # num_active_receiver_cores is the RECIPIENT count = EXCLUDE_SRC num_dests = ACK count. The sender
+    # sits in the box with src==dst (its own A copy is in place), so it is NOT a recipient -> the
+    # recipients are the other num_cores-1 cores.
+    num_active_cores = num_cores - 1
 
     # --- Mcast rectangle (virtual coords of the full grid) ---
     v_lo = device.worker_core_from_logical_core(ttnn.CoreCoord(0, 0))
@@ -172,9 +170,7 @@ def create_program_descriptor(
         return ttnn.CBDescriptor(
             total_size=total_size,
             core_ranges=all_crs,
-            format_descriptors=[
-                ttnn.CBFormatDescriptor(buffer_index=idx, data_format=fmt, page_size=page_size)
-            ],
+            format_descriptors=[ttnn.CBFormatDescriptor(buffer_index=idx, data_format=fmt, page_size=page_size)],
         )
 
     cbs = [

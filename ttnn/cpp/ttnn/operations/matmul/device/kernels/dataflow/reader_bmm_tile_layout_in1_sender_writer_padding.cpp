@@ -209,25 +209,24 @@ void kernel_main() {
     const auto s_sparsity = TensorAccessor(sparsity_args, sparsity_addr);
 
 #ifndef SKIP_MCAST
-    // Set ur local VALID value, to be mcasted to destinations flag address after the data has been mcasted
-    receiver_sem.set(VALID);
-    // local address that will be atomically incremented by mcast receivers, to know when all receivers are ready
-    // to receive the mcast
-
     // mcast_pipe: the in1 (and bias in3) block data-mcast + handshake is driven by a two-sided Pipe.
     //   data_ready = receiver_sem (S->R level flag VALID/INVALID), consumed = sender_sem (R->S counter).
-    //   EXCLUDE_SRC, Flag, PRE_HANDSHAKE=true (receivers' reused CB slot), LINK=true (orig linked
-    //   data mcast + ARCH_BLACKHOLE flush; Pipe always flushes). Same rect/sems serve both send()s.
-    dataflow_kernel_lib::Pipe<> in1_pipe(
+    //   src == dst so the Pipe infers EXCLUDE_SRC — never self-overwrites its own in1/bias source. Flag,
+    //   PRE_HANDSHAKE=true (receivers' reused CB slot); linked data;flag + flush is always-on. Same
+    //   rect/sems serve both send()s (in1 + bias).
+    //   NUM_ACTIVE_RECEIVER_CORES is the RECIPIENT count = EXCLUDE_SRC num_dests = ACK count =
+    //   `in1_mcast_num_dests` exactly (what R3 waited on). The in1 sender sits OUTSIDE its mcast rect,
+    //   so EXCLUDE_SRC mcast_dests == in1_mcast_num_dests directly. Sem ids + count are template params;
+    //   the local data-ready VALID pre-set is now owned by the ctor (INITIAL_READY defaults to VALID).
+    constexpr uint32_t in1_data_ready_sem_id = get_compile_time_arg_val(11);
+    constexpr uint32_t in1_consumed_sem_id = get_compile_time_arg_val(10);
+    dataflow_kernel_lib::SenderPipe<in1_mcast_num_dests, in1_data_ready_sem_id, in1_consumed_sem_id> in1_pipe(
         noc,
         dataflow_kernel_lib::McastRect{
             in1_mcast_dest_noc_start_x,
             in1_mcast_dest_noc_start_y,
             in1_mcast_dest_noc_end_x,
-            in1_mcast_dest_noc_end_y},  // area() = in1_mcast_num_cores (the full mcast grid)
-        in1_mcast_num_dests,            // active-core ACK count (may be < num_cores when cores-without-work exist)
-        receiver_sem,                   // data ready (S->R level flag)
-        sender_sem);                    // consumed (R->S counter)
+            in1_mcast_dest_noc_end_y});
 
 #ifdef IN1_SHARDED
     uint64_t in1_start_address = cb_in1.get_write_ptr();
@@ -329,9 +328,7 @@ void kernel_main() {
                                 uint32_t l1_read_addr_in1_temp = l1_read_addr_in1;
                                 uint32_t l1_write_addr_in1_temp = l1_write_addr_in1;
                                 for (uint32_t w = 0; w < in1_block_w_dram; ++w) {
-                                    noc.async_read_with_state<
-                                        NocOptions::CUSTOM_VC,
-                                        NOC_MAX_BURST_SIZE>(
+                                    noc.async_read_with_state<NocOptions::CUSTOM_VC, NOC_MAX_BURST_SIZE>(
                                         dram_bank,
                                         CoreLocalMem<uint32_t>(l1_write_addr_in1_temp),
                                         in1_single_tile_size_bytes,
@@ -580,8 +577,7 @@ void kernel_main() {
                                 for (uint32_t w = 0; w < out_subblock_w_; ++w) {
                                     if (bw < num_blocks_w_dim_) {
                                         noc.async_write(
-                                            use<CircularBuffer::AddrSelector::READ_PTR>(
-                                                cb_out),
+                                            use<CircularBuffer::AddrSelector::READ_PTR>(cb_out),
                                             s,
                                             output_single_tile_size_bytes,
                                             {.offset_bytes = out_read_offset},

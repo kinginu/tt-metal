@@ -267,9 +267,10 @@ def _run_f3(device, rect_len, payload_tiles, n_iters):
     page_bytes = TILE_BYTES
     payload_pages = payload_tiles
     R = rect_len
-    # sender is IN the rect; num_active_receiver_cores is the FULL count INCLUDING the sender, so
-    # R. R==1 is the degenerate self-only case (ack_count==0) the Pipe must collapse to a local copy.
-    num_active_cores = R
+    # sender is IN the rect (INCLUDE_SRC loopback); num_active_receiver_cores is the RECIPIENT count
+    # = the OTHER R-1 cores (the helper adds +1 for the sender's own self-copy). R==1 is the
+    # degenerate self-only case (0 recipients) the Pipe collapses to a local copy.
+    num_active_cores = R - 1
 
     in_shape = [1, 1, 32, 32 * payload_tiles]
     payload = torch.arange(0, payload_tiles * 1024, dtype=torch.float32).reshape(in_shape).to(torch.bfloat16)

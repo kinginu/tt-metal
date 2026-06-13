@@ -33,27 +33,31 @@
 // infers everything else:
 //   * `McastRect` is PURE GEOMETRY — the broadcast bounding box; it is NOT a transfer count. It is
 //     the ONLY runtime ctor arg (its virtual coords vary per sender core under one kernel binary).
-//   * `NUM_ACTIVE_RECEIVER_CORES` (a TEMPLATE param — compile-time, core-uniform) is the FULL count
-//     of cores that receive the broadcast, INCLUDING the sender itself when the sender is one of the
-//     recipients (it consumes its own copy — matmul in0 / conv-WS self-gather / R6 extract). The
-//     SenderPipe derives the two hardware counts from it, so the caller never reasons about mcast mode:
-//        ack_count   = receivers that ack back to the sender (everyone EXCEPT the sender's
-//                      own copy)            = num_active_receiver_cores - (sender_in_rect ? 1 : 0)
-//        mcast_dests = cores the data/flag write lands on
-//                      = INCLUDE_SRC(loopback) ? num_active_receiver_cores : ack_count
+//   * `NUM_ACTIVE_RECEIVER_CORES` (a TEMPLATE param — compile-time, core-uniform) is the RECIPIENT
+//     count: the number of cores the data is multicast to, NOT counting the sender's own in-place
+//     copy. It equals the EXCLUDE_SRC NoC `num_dests` AND the R->S ACK count — exactly the value every
+//     production factory already computes (matmul's `in0_mcast_num_dests`, etc.), so a shared sender
+//     kernel passes the same value across topologies (1D in-rect / 2D out-of-rect) with no host edit.
+//     The SenderPipe derives the mcast population from it per inferred mode, so the caller never
+//     reasons about mcast mode:
+//        EXCLUDE_SRC            : mcast_dests = NUM_ACTIVE_RECEIVER_CORES         (ack count = same)
+//        INCLUDE_SRC (loopback) : mcast_dests = NUM_ACTIVE_RECEIVER_CORES + 1     (+1 = the self-copy;
+//                                 the self-copy does not ack, so the ACK count stays = NUM_ACTIVE...)
 //     (For a future op where ACKs < recipients — conv-1D weights — a third count would be
 //     needed; out of scope.)
 //
 // The EXCLUDE_SRC vs INCLUDE_SRC (loopback) choice is INFERRED per send(), no caller input:
 //   loopback (INCLUDE_SRC) iff `sender_in_rect_() && src != dst`. `my_x`/`my_y` are read
 //   in the Pipe's `noc_` index space, the same space the rect uses (IR1).
+//   (N = NUM_ACTIVE_RECEIVER_CORES, the recipient count.)
 //   * sender OUTSIDE box                  -> plain multicast (EXCLUDE_SRC), mcast_dests = N
-//   * sender INSIDE box, src != dst       -> loopback multicast (INCLUDE_SRC): if the sender is
-//       a recipient (conv-WS self-gather) this IS its own copy; mcast_dests = N (self included).
-//   * sender INSIDE box, src == dst       -> plain multicast (EXCLUDE_SRC), mcast_dests = N-1:
-//       its copy is already in place (matmul in0, R6 extract path); never self-overwrite.
-//   * ack_count == 0 (sender alone in box / no receivers) -> self-only local copy (loopback to
-//       just self hangs, H5); skip handshake/fence.
+//   * sender INSIDE box, src != dst       -> loopback multicast (INCLUDE_SRC): the sender is itself
+//       a recipient (conv-WS self-gather) -> mcast_dests = N + 1 (its self-copy is the +1).
+//   * sender INSIDE box, src == dst       -> plain multicast (EXCLUDE_SRC), mcast_dests = N:
+//       its copy is already in place (matmul in0, R6 extract path); never self-overwrite. N here is
+//       the OTHER cores (the in-box sender is not counted in N — N is recipients, not box area).
+//   * N == 0 (no receiver cores) -> self-only local copy if in box (loopback to just self hangs,
+//       H5); else nothing. Skip handshake/fence.
 //   The flag mcast rides the SAME mode as the data mcast of that send() (INV4 single path);
 //   send_signal() has no data so it is always EXCLUDE_SRC.
 //   OUT of inference reach: a sender that needs the loopback FLAG with src == dst (R6 role-flip
@@ -221,26 +225,25 @@ public:
     //   raise flag                          — data-before-flag, same VC (INV4); reset owned (H11)
     //   fence                               — flush (F1); atomic-barrier on the counter path
     void send(uint32_t src_l1, uint32_t dst_l1, uint32_t size) {
-        const bool in_rect = sender_in_rect_();
-        // ACKs come from every recipient EXCEPT the sender's own copy.
-        const uint32_t ack_count = in_rect ? NUM_ACTIVE_RECEIVER_CORES - 1 : NUM_ACTIVE_RECEIVER_CORES;
-
-        // Self-only degenerate: no remote receivers. If the sender lands its own copy elsewhere,
-        // do a local copy (loopback to just self is unspecified / may hang, H5); else nothing.
-        if (ack_count == 0) {
-            if (in_rect) {
+        // Self-only degenerate: no receiver cores at all. If the sender is in its own box and lands
+        // a copy elsewhere, do a local copy (loopback to just self may hang, H5); else nothing.
+        if (NUM_ACTIVE_RECEIVER_CORES == 0) {
+            if (sender_in_rect_()) {
                 local_copy_(src_l1, dst_l1, size);
             }
             return;
         }
         if constexpr (PRE_HANDSHAKE) {
-            consumed_.wait(ack_count);
+            consumed_.wait(NUM_ACTIVE_RECEIVER_CORES);
             consumed_.set(0);
         }
         // Loopback iff the sender is in the box AND lands its own copy somewhere else than its
         // source (src == dst means the copy is already in place; never self-overwrite in place).
-        const bool loopback = in_rect && src_l1 != dst_l1;
-        const uint32_t mcast_dests = loopback ? NUM_ACTIVE_RECEIVER_CORES : ack_count;
+        const bool loopback = sender_in_rect_() && src_l1 != dst_l1;
+        // NUM_ACTIVE_RECEIVER_CORES is the RECIPIENT count (the EXCLUDE_SRC NoC num_dests = the ACK
+        // count). The loopback (INCLUDE_SRC) path adds +1 for the sender's own self-copy. The sender's
+        // own copy never acks, so the consumed wait above is on NUM_ACTIVE_RECEIVER_CORES.
+        const uint32_t mcast_dests = loopback ? NUM_ACTIVE_RECEIVER_CORES + 1 : NUM_ACTIVE_RECEIVER_CORES;
         send_data_(src_l1, dst_l1, size, loopback, mcast_dests);
         raise_flag_(VALID, loopback, mcast_dests);  // flag rides the same mode as the data (INV4)
         fence_();
@@ -249,13 +252,12 @@ public:
     // ===== CONTROL channel (a pure flag, no data block, R2) =====
     // Broadcast a control flag. `value` carries a payload for value-carrying flags
     // (e.g. moe_gpt token counts); defaults to VALID for a plain doorbell. Always EXCLUDE_SRC
-    // (no data accompanies it), so the destination population is just ack_count.
+    // (no data accompanies it), so the destination population is the recipient count.
     void send_signal(uint32_t value = VALID) {
-        const uint32_t dests = sender_in_rect_() ? NUM_ACTIVE_RECEIVER_CORES - 1 : NUM_ACTIVE_RECEIVER_CORES;
-        if (dests == 0) {
+        if (NUM_ACTIVE_RECEIVER_CORES == 0) {
             return;  // nobody to signal
         }
-        raise_flag_(value, /*loopback=*/false, dests);
+        raise_flag_(value, /*loopback=*/false, NUM_ACTIVE_RECEIVER_CORES);
         fence_();
     }
 

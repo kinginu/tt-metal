@@ -154,17 +154,19 @@ void kernel_main() {
 #ifndef SKIP_MCAST
     // mcast_pipe: the in0 block data-mcast + handshake is driven by a two-sided Pipe.
     //   data_ready = receiver_sem (S->R level flag, VALID/INVALID), consumed = sender_sem (R->S counter).
-    //   The sender sits in the box corner and IS one of the recipients (it consumes its own copy), but
-    //   src == dst so the Pipe infers EXCLUDE_SRC — it must not self-overwrite its own in0 source. The
-    //   linked data;flag + flush is always-on (F4/F1). PRE_HANDSHAKE=true: dest L1 is the receivers'
-    //   reused in0 CB slot, so the R->S "consumed" wait gates each block.
-    //   NUM_ACTIVE_RECEIVER_CORES is the FULL recipient count INCLUDING the in-box sender, so it is the
-    //   old ACK count (in0_mcast_num_dests) + 1. Done as constexpr in-kernel so the host factory is
-    //   unchanged (kernels are JIT-compiled). Sem ids + count are template params; the sender's local
-    //   data-ready VALID pre-set is now owned by the ctor (INITIAL_READY defaults to VALID).
+    //   The sender sits in its mcast rect with src == dst, so the Pipe infers EXCLUDE_SRC — it must not
+    //   self-overwrite its own in0 source. The linked data;flag + flush is always-on (F4/F1).
+    //   PRE_HANDSHAKE=true: dest L1 is the receivers' reused in0 CB slot, so the R->S "consumed" wait
+    //   gates each block.
+    //   NUM_ACTIVE_RECEIVER_CORES is the RECIPIENT count = the EXCLUDE_SRC NoC num_dests = the ACK
+    //   count = `in0_mcast_num_dests` exactly (what R3 waited on). This is the same value the 1D factory
+    //   (sender in-rect) and the 2D factory (sender out-of-rect) both pass — the helper no longer
+    //   subtracts for the in-box sender, so the SHARED kernel needs no per-topology +/-1 and no host
+    //   edit. Sem ids + count are template params; the local data-ready VALID pre-set is owned by the
+    //   ctor (INITIAL_READY defaults to VALID).
     constexpr uint32_t in0_data_ready_sem_id = get_compile_time_arg_val(16);
     constexpr uint32_t in0_consumed_sem_id = get_compile_time_arg_val(15);
-    dataflow_kernel_lib::SenderPipe<in0_mcast_num_dests + 1, in0_data_ready_sem_id, in0_consumed_sem_id> in0_pipe(
+    dataflow_kernel_lib::SenderPipe<in0_mcast_num_dests, in0_data_ready_sem_id, in0_consumed_sem_id> in0_pipe(
         noc,
         dataflow_kernel_lib::McastRect{
             in0_mcast_dest_noc_start_x,

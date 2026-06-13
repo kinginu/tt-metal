@@ -69,10 +69,8 @@ void kernel_main() {
     Noc noc;
     CircularBuffer cb_in0(cb_id_in0);
     CircularBuffer cb_in2(cb_id_in2);
-    // local address that will be atomically incremented by mcast receivers, to know when all receivers are ready
-    // to receive the mcast
-    Semaphore<> sender_sem(get_compile_time_arg_val(9));
-    // Set ur local VALID value, to be mcasted to destinations flag address after the data has been mcasted
+    // The R->S "consumed" counter (CT 9) is owned by the Pipe (passed as a template id). `receiver_sem`
+    // is the local data-ready flag, kept here for the raw top-of-loop INVALID reset.
     Semaphore<> receiver_sem(get_compile_time_arg_val(10));
 
     constexpr uint32_t num_remote_senders = (num_blocks_inner_dim + num_blocks_per_shard - 1) / num_blocks_per_shard;
@@ -101,24 +99,26 @@ void kernel_main() {
             }
         }
     }
-    receiver_sem.set(VALID);
-
     // mcast_pipe (R6 role-flip): every grid core runs BOTH faces of the channel over the rotating
     // rounds. SENDER face below; the per-round RECEIVER face is built inside the loop (its ack
-    // target rotates with block_id). One count works here: the factory always sets
-    // in0_mcast_num_dests == in0_mcast_num_cores. The Pipe never counts self, so in-grid cores
-    // pass num_dests - 1. Loopback is inferred per send(): extract (src == dst, block already in
-    // cb_in0) -> EXCLUDE; non-extract (cb_in2 -> cb_in0) -> INCLUDE; out-of-grid -> EXCLUDE.
-    // In-grid single-core (active == 0) collapses to the local-copy degenerate.
+    // target rotates with block_id). in0_pipe_active_cores is the RECIPIENT count = EXCLUDE_SRC
+    // num_dests = ACK count: in-grid cores pass num_dests - 1 (the helper adds +1 back on the
+    // INCLUDE non-extract path), out-of-grid pass num_dests. Loopback is inferred per send():
+    // extract (src == dst, block already in cb_in0) -> EXCLUDE; non-extract (cb_in2 -> cb_in0)
+    // -> INCLUDE; out-of-grid -> EXCLUDE. In-grid single-core (active == 0) collapses to the
+    // local-copy degenerate. The local data-ready VALID pre-set is owned by the SenderPipe ctor
+    // (INITIAL_READY defaults to VALID). Sem ids + count are template params.
+    constexpr uint32_t in0_data_ready_sem_id = get_compile_time_arg_val(10);
+    constexpr uint32_t in0_consumed_sem_id = get_compile_time_arg_val(9);
     constexpr uint32_t in0_pipe_active_cores =
         core_in_in0_receiver_mcast_grid ? in0_mcast_num_dests - 1 : in0_mcast_num_dests;
-    dataflow_kernel_lib::Pipe<> in0_send_pipe(
+    dataflow_kernel_lib::SenderPipe<in0_pipe_active_cores, in0_data_ready_sem_id, in0_consumed_sem_id> in0_send_pipe(
         noc,
         dataflow_kernel_lib::McastRect{
-            in0_mcast_dest_noc_start_x, in0_mcast_dest_noc_start_y, in0_mcast_dest_noc_end_x, in0_mcast_dest_noc_end_y},
-        in0_pipe_active_cores,
-        receiver_sem,  // data ready (S->R level flag)
-        sender_sem);   // consumed (R->S counter)
+            in0_mcast_dest_noc_start_x,
+            in0_mcast_dest_noc_start_y,
+            in0_mcast_dest_noc_end_x,
+            in0_mcast_dest_noc_end_y});
 
     cb_in2.reserve_back(batch * in0_block_num_tiles);
 
@@ -246,14 +246,9 @@ void kernel_main() {
                         // block_id. receive() acks the sender, waits VALID, clears the flag (H11);
                         // the top-of-loop INVALID reset stays raw — it also clears the stale VALID
                         // this core's own sender round leaves behind.
-                        dataflow_kernel_lib::Pipe<> in0_recv_pipe(
-                            noc,
-                            dataflow_kernel_lib::McastRect::single_core(
-                                remote_sender_noc_x[block_id], remote_sender_noc_y[block_id]),
-                            1,
-                            receiver_sem,
-                            sender_sem);
-                        in0_recv_pipe.receive();
+                        dataflow_kernel_lib::ReceiverPipe<in0_data_ready_sem_id, in0_consumed_sem_id> in0_recv_pipe(
+                            noc);
+                        in0_recv_pipe.receive(remote_sender_noc_x[block_id], remote_sender_noc_y[block_id]);
                     }
                     cb_in0.push_back(in0_block_num_tiles);
 
