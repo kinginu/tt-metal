@@ -15,6 +15,7 @@
 #include <nanobind/stl/vector.h>
 
 #include "sdpa.hpp"
+#include "sparse_sdpa.hpp"
 #include "ttnn-nanobind/bind_function.hpp"
 #include "ttnn/operations/ccl/ccl_host_types.hpp"
 #include "ttnn/operations/ccl/ccl_common.hpp"
@@ -319,6 +320,37 @@ void bind_sdpa(nb::module_& mod) {
         nb::arg("program_config") = nb::none(),
         nb::arg("compute_kernel_config") = nb::none(),
         nb::arg("attention_sink") = nb::none());
+
+    ttnn::bind_function<"sparse_sdpa", "ttnn.transformer.">(
+        mod,
+        R"doc(
+        Sparse MLA prefill (DeepSeek DSA), Blackhole single-chip. softmax(Q@Kᵀ·scale masked)@V over the
+        top-k selected latents per query token; V = kv[..., :512]. Masking is baked into `indices`
+        (0xFFFFFFFF = masked; sentinels are a contiguous tail). Inputs are ROW-MAJOR DRAM-interleaved.
+
+        Args:
+            q (ttnn.Tensor):       [1, H, S, 576] bf16   (H == 32)
+            kv (ttnn.Tensor):      [1, 1, T, 576] bf16
+            indices (ttnn.Tensor): [1, 1, S, TOPK] uint32
+
+        Keyword args:
+            scale (float, optional): defaults to 576**-0.5.
+            k_chunk_size (int): defaults to 128 (must divide TOPK, multiple of 32).
+            memory_config (ttnn.MemoryConfig, optional): defaults to DRAM interleaved.
+            compute_kernel_config (ttnn.DeviceComputeKernelConfig, optional): fp32_dest_acc_en must be false.
+
+        Returns:
+            ttnn.Tensor: [1, H, S, 512] bf16 ROW-MAJOR.
+        )doc",
+        &ttnn::transformer::sparse_sdpa,
+        nb::arg("q").noconvert(),
+        nb::arg("kv").noconvert(),
+        nb::arg("indices").noconvert(),
+        nb::kw_only(),
+        nb::arg("scale") = nb::none(),
+        nb::arg("k_chunk_size") = 128,
+        nb::arg("memory_config") = nb::none(),
+        nb::arg("compute_kernel_config") = nb::none());
 
     const auto* const chunked_doc =
         R"doc(
