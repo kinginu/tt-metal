@@ -1379,3 +1379,37 @@ def test_group_norm_optional_weight_bias(
         atol=atol,
         frobenius_threshold=frobenius_threshold,
     )
+
+
+def test_group_norm_rejects_row_major_interleaved_input(device):
+    """A ROW_MAJOR interleaved (non-sharded) input must be rejected on host (issue #26594).
+
+    The interleaved group_norm reader reads tiled pages directly and has no row-major un-tiling
+    step; only the sharded kernel internally tilizes a ROW_MAJOR input. Passing a ROW_MAJOR
+    interleaved tensor therefore used to make the device read mis-formatted data and hang
+    indefinitely - even with weight, bias and input_mask all omitted. The op must now fail fast with
+    a clear, actionable error before any kernel is dispatched, rather than wedging the board.
+    """
+    torch.manual_seed(0)
+
+    N, C, H, W, num_groups = 1, 480, 1, 64, 8
+
+    # ROW_MAJOR, interleaved DRAM input (deliberately not tilized) - the layout that triggered the hang.
+    torch_input = torch.rand((N, C, H, W), dtype=torch.bfloat16)
+    input_tensor = torch_input.permute(0, 2, 3, 1).view(N, 1, H * W, C)
+    input_tensor = ttnn.from_torch(
+        input_tensor,
+        dtype=ttnn.DataType.BFLOAT16,
+        layout=ttnn.ROW_MAJOR_LAYOUT,
+        device=device,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    )
+
+    # weight, bias and input_mask are intentionally omitted - the exact combination that hung.
+    with pytest.raises(RuntimeError, match="must be in TILE layout"):
+        ttnn.group_norm(
+            input_tensor,
+            num_groups=num_groups,
+            core_grid=ttnn.CoreGrid(y=1, x=1),
+            inplace=False,
+        )

@@ -183,6 +183,17 @@ Tensor group_norm(
         input_tensor.memory_config().memory_layout() != TensorMemoryLayout::WIDTH_SHARDED,
         "Unsupported memory layout: Input tensor cannot be width-sharded.");
 
+    // Interleaved (non-sharded) group_norm reads tiled pages directly: its reader kernel has no
+    // row-major un-tiling path (unlike the sharded kernel, which internally tilizes a ROW_MAJOR
+    // input). A ROW_MAJOR interleaved input therefore makes the device read mis-formatted data and
+    // hang. Reject it up front with an actionable error instead of hanging the board.
+    TT_FATAL(
+        input_tensor.is_sharded() || input_tensor.layout() == Layout::TILE,
+        "group_norm: Interleaved (non-sharded) input_tensor must be in TILE layout, got {}. "
+        "Tilize the input first (e.g. ttnn.tilize_with_zero_padding), or provide a sharded input "
+        "(ROW_MAJOR is only supported for sharded inputs).",
+        input_tensor.layout());
+
     const auto& input_shape = input_tensor.logical_shape();
     TT_FATAL(
         input_shape.rank() == 4, "Invalid tensor shape: Input tensor must have rank 4. (rank={})", input_shape.rank());
