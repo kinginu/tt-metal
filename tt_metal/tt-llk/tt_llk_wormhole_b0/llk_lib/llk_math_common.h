@@ -100,12 +100,6 @@ inline void _llk_math_hw_configure_(const std::uint32_t srca_data_format, const 
 
     cfg_reg_rmw_tensix<ALU_ACC_CTRL_Fp32_enabled_RMW>(is_fp32_dest_acc_en);
     cfg_reg_rmw_tensix<ALU_ACC_CTRL_SFPU_Fp32_enabled_RMW>(is_fp32_dest_acc_en);
-
-    // Beware the inverted naming: _llk_math_dbg_feature_enable_() CLEARS bit 11, _llk_math_dbg_feature_disable_()
-    // SETS it. We never set bit 11 anymore (no path calls _llk_math_dbg_feature_disable_); we only clear it here,
-    // at math HW configure time, to guarantee a known-good baseline that cannot leak in from a previous kernel
-    // that left it set (tt-llk#1568).
-    _llk_math_dbg_feature_enable_();
 }
 
 /**
