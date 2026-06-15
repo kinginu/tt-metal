@@ -280,10 +280,10 @@ private:
         // linked=false to terminate the chain). The linked pair enforces data-before-flag without
         // a barrier (F4, −36%). No unlinked arm — see the header note.
         if (loopback) {
-            noc_.async_write_multicast<Noc::McastMode::INCLUDE_SRC>(
+            noc_.async_write_multicast<NocOptions::MCAST_INCL_SRC>(
                 src_ep, dst_ep, size, mcast_dests, src_args, dst_args, /*linked=*/true);
         } else {
-            noc_.async_write_multicast<Noc::McastMode::EXCLUDE_SRC>(
+            noc_.async_write_multicast<NocOptions::DEFAULT>(
                 src_ep, dst_ep, size, mcast_dests, src_args, dst_args, /*linked=*/true);
         }
     }
@@ -298,10 +298,10 @@ private:
         } else {
             data_ready_.set(value);
             if (loopback) {
-                data_ready_.set_multicast<Noc::McastMode::INCLUDE_SRC>(
+                data_ready_.set_multicast<NocOptions::MCAST_INCL_SRC>(
                     noc_, r.sx, r.sy, r.ex, r.ey, mcast_dests, /*linked=*/false);
             } else {
-                data_ready_.set_multicast<Noc::McastMode::EXCLUDE_SRC>(
+                data_ready_.set_multicast<NocOptions::DEFAULT>(
                     noc_, r.sx, r.sy, r.ex, r.ey, mcast_dests, /*linked=*/false);
             }
         }
