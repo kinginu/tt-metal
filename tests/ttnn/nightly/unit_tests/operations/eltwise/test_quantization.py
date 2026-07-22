@@ -674,3 +674,91 @@ def test_requant_uint8_mixed_dtype_per_tensor_2d(device, in_dtype, in_q_max, out
     result_tr = ttnn.to_torch(dequantized_tt)
     check_pcc(input_tr, result_tr, True)
     check_match_ratio(input_tr, result_tr, ttnn.float32)
+
+
+# ---------------------------------------------------------------------------
+# Per-channel quantize/dequantize with a SCALAR zero-point (fused fast-path).
+#
+# These exercise the fused single-pass QUANT/DEQUANT LLK with a broadcast
+# per-channel scale (operand B) and a scalar zero-point (runtime arg) -- the
+# common symmetric per-channel weight-quantization case. Before this path
+# existed, per-channel quant/dequant always fell back to the slower
+# divide/subtract + add/multiply composite. Each test asserts BOTH:
+#   (a) equivalence: fused (scalar zp) == composite (per-channel zp tensor
+#       filled with the same scalar), anchoring the new path to the
+#       already-validated composite path, and
+#   (b) correctness against the torch golden at FULL PCC (no relaxation).
+# ---------------------------------------------------------------------------
+def _per_channel_amax_scale(input_tr, axis):
+    """Symmetric per-channel scale = amax/127 (values land in int8 range, zp=0)."""
+    dims = [d for d in range(input_tr.dim()) if d != axis]
+    amax = input_tr.abs().amax(dim=dims)
+    return (amax / 127.0).clamp_min(1e-8).to(torch.float32)
+
+
+@pytest.mark.parametrize("shape", [(64, 96), (128, 128), (3, 64, 160)])
+@pytest.mark.parametrize("input_dtype", [ttnn.float32, ttnn.bfloat16])
+def test_quantize_dequantize_per_channel_symmetric(device, shape, input_dtype):
+    """Symmetric (zp=0) per-channel round-trip: fused vs composite vs torch golden."""
+    torch.manual_seed(0)
+    input_tr = (torch.rand(*shape, dtype=torch.float32) - 0.5) * 4.0  # centered, both signs
+    input_tt = ttnn.from_torch(input_tr, dtype=input_dtype, layout=ttnn.TILE_LAYOUT, device=device)
+
+    rank = len(shape)
+    for axis in range(-rank, rank):
+        axis_n = (axis + rank) % rank
+        scale_vec = _per_channel_amax_scale(input_tr, axis_n)
+        zp_vec = torch.zeros(shape[axis_n], dtype=torch.int32)
+
+        scale_tt = ttnn.from_torch(scale_vec, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=device)
+        zp_vec_tt = ttnn.from_torch(zp_vec, dtype=ttnn.int32, layout=ttnn.TILE_LAYOUT, device=device)
+
+        quantized_golden = torch.quantize_per_channel(input_tr, scale_vec, zp_vec, axis=axis_n, dtype=torch.qint32)
+        dequantized_golden = torch.dequantize(quantized_golden)
+
+        # quantize: fused (scalar zp=0) vs composite (tensor zp) vs golden
+        q_fused = ttnn.quantize(input_tt, scale_tt, 0, axis=axis)  # NEW fused path
+        q_comp = ttnn.quantize(input_tt, scale_tt, zp_vec_tt, axis=axis)
+        q_fused_tr = ttnn.to_torch(q_fused)
+        check_pcc(ttnn.to_torch(q_comp), q_fused_tr, False)
+        check_pcc(quantized_golden.int_repr(), q_fused_tr, False)
+        check_match_ratio(quantized_golden, q_fused_tr, ttnn.int32)
+
+        # dequantize: fused (scalar zp=0) vs composite (tensor zp) vs golden
+        dq_fused = ttnn.dequantize(q_fused, scale_tt, 0, axis=axis, dtype=input_dtype)  # NEW fused path
+        dq_comp = ttnn.dequantize(q_fused, scale_tt, zp_vec_tt, axis=axis, dtype=input_dtype)
+        dq_fused_tr = ttnn.to_torch(dq_fused)
+        check_pcc(ttnn.to_torch(dq_comp), dq_fused_tr, False)
+        check_pcc(dequantized_golden, dq_fused_tr, False)
+        check_match_ratio(dequantized_golden, dq_fused_tr, input_dtype)
+
+
+@pytest.mark.parametrize("shape", [(64, 96), (128, 128), (3, 64, 160)])
+@pytest.mark.parametrize("out_dtype", [ttnn.float32, ttnn.bfloat16])
+@pytest.mark.parametrize("zero_point", [0, 5, -7])
+def test_dequantize_per_channel_scalar_zero_point(device, shape, out_dtype, zero_point):
+    """Dequantize with an arbitrary int input, per-channel scale, scalar zp: fused vs composite vs golden."""
+    torch.manual_seed(0)
+    q_tr = torch.randint(-128, 127, shape, dtype=torch.int32)
+    q_tt = ttnn.from_torch(q_tr, dtype=ttnn.int32, layout=ttnn.TILE_LAYOUT, device=device)
+
+    rank = len(shape)
+    for axis in range(-rank, rank):
+        axis_n = (axis + rank) % rank
+        axis_size = shape[axis_n]
+        scale_vec = torch.rand(axis_size, dtype=torch.float32) * 0.05 + 0.005
+        zp_vec = torch.full((axis_size,), zero_point, dtype=torch.int32)
+
+        scale_tt = ttnn.from_torch(scale_vec, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=device)
+        zp_vec_tt = ttnn.from_torch(zp_vec, dtype=ttnn.int32, layout=ttnn.TILE_LAYOUT, device=device)
+
+        bshape = [1] * rank
+        bshape[axis_n] = axis_size
+        golden = (q_tr.to(torch.float32) - zero_point) * scale_vec.reshape(bshape)
+
+        dq_fused = ttnn.dequantize(q_tt, scale_tt, zero_point, axis=axis, dtype=out_dtype)  # NEW fused path
+        dq_comp = ttnn.dequantize(q_tt, scale_tt, zp_vec_tt, axis=axis, dtype=out_dtype)
+        dq_fused_tr = ttnn.to_torch(dq_fused)
+        check_pcc(ttnn.to_torch(dq_comp), dq_fused_tr, False)
+        check_pcc(golden, dq_fused_tr, False)
+        check_match_ratio(golden, dq_fused_tr, out_dtype)

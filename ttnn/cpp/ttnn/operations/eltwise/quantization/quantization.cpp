@@ -224,6 +224,36 @@ Tensor quantize(
         const int32_t axis_v = axis.value();
         const ttnn::Shape& input_shape = input_a.logical_shape();
 
+        // Fused fast-path: per-channel scale with a SCALAR zero-point rides the single-pass
+        // QUANT LLK. Operand B streams the per-element reciprocal-scale (broadcast across the
+        // tensor by binary_ng), and the zero-point is a scalar runtime arg. Covers symmetric
+        // (zp=0) per-channel weight quantization and avoids the slower divide+add composite
+        // fallback below. A per-channel (tensor) zero-point cannot ride the scalar-RT-arg LLK,
+        // so it still takes the decomposed path.
+        if (scale_p != nullptr) {
+            if (const int32_t* zp_scalar = std::get_if<int32_t>(&zero_point)) {
+                const int32_t rank = static_cast<int32_t>(input_shape.rank());
+                check_scale_tensor_args(input_a, scale_p, axis_v, rank, /*is_per_channel=*/true);
+                // The LLK multiplies by the reciprocal of the scale to avoid a device-side divide.
+                const Tensor recip_scale_full =
+                    reshape_per_channel_vector_args(ttnn::reciprocal(*scale_p), input_shape, axis_v, DataType::FLOAT32);
+                const std::array post_activation{operations::unary::EltwiseUnaryWithParam{
+                    operations::unary::UnaryOpType::ZERO_POINT, static_cast<float>(*zp_scalar)}};
+                return ttnn::prim::binary_ng(
+                    input_a,
+                    recip_scale_full,
+                    operations::binary::BinaryOpType::QUANT,
+                    c_dtype,
+                    memory_config,
+                    optional_output_tensor,
+                    /*fast_and_approximate_mode*/ false,
+                    none,
+                    none,
+                    post_activation,
+                    std::nullopt);
+            }
+        }
+
         check_per_channel_tensor_args(input_a, scale_p, zero_point_p, axis_v, input_shape.rank());
 
         const Tensor scale_full = reshape_per_channel_vector_args(*scale_p, input_shape, axis_v, a_dtype);
@@ -497,6 +527,35 @@ Tensor dequantize(
 
         const int32_t axis_v = axis.value();
         const ttnn::Shape& input_shape = input_tensor.logical_shape();
+
+        // Fused fast-path: per-channel scale with a SCALAR zero-point rides the single-pass
+        // DEQUANT LLK. Operand B streams the per-element scale (broadcast across the tensor by
+        // binary_ng), and the zero-point is a scalar runtime arg. This covers symmetric (zp=0)
+        // per-channel weight quantization -- the common LLM case -- and avoids the slower &
+        // less accurate subtract+multiply composite fallback below. A per-channel (tensor)
+        // zero-point cannot ride the scalar-RT-arg LLK, so it still takes the decomposed path.
+        if (scale_p != nullptr) {
+            if (const int32_t* zp_scalar = std::get_if<int32_t>(&zero_point)) {
+                const int32_t rank = static_cast<int32_t>(input_shape.rank());
+                check_scale_tensor_args(input_tensor, scale_p, axis_v, rank, /*is_per_channel=*/true);
+                const Tensor scale_full =
+                    reshape_per_channel_vector_args(*scale_p, input_shape, axis_v, DataType::FLOAT32);
+                const std::array post_activation{operations::unary::EltwiseUnaryWithParam{
+                    operations::unary::UnaryOpType::ZERO_POINT, static_cast<float>(-*zp_scalar)}};
+                return ttnn::prim::binary_ng(
+                    input_tensor,
+                    scale_full,
+                    operations::binary::BinaryOpType::DEQUANT,
+                    c_dtype,
+                    memory_config,
+                    optional_output_tensor,
+                    /*fast_and_approximate_mode*/ false,
+                    none,
+                    none,
+                    post_activation,
+                    std::nullopt);
+            }
+        }
 
         check_per_channel_tensor_args(input_tensor, scale_p, zero_point_p, axis_v, input_shape.rank());
 
