@@ -1540,6 +1540,22 @@ class ModelArgs:
             if seq_len >= 2048
             else min(64, chunk_start_idx & -chunk_start_idx)
         )
+        # L1-aware cap on chunk size. The base values above are tuned for the
+        # head_dim<=128 models we ship, but SDPA circular buffers scale with
+        # chunk*head_dim, so at large head_dim (e.g. MLA at head_dim=512) a chunk
+        # of 256 overflows Blackhole L1 and the op throws at program build. Cap to
+        # the largest chunk that fits L1, measured empirically and monotonic in
+        # head_dim. This only lowers the chunk (min), so head_dim<=256 models are
+        # unchanged and the chunk_start_idx divisibility invariant is preserved
+        # (both operands are powers of two).
+        if self.head_dim <= 256:
+            l1_max_chunk = 256
+        elif self.head_dim <= 512:
+            l1_max_chunk = 128
+        else:
+            l1_max_chunk = 64
+        q_chunk = min(q_chunk, l1_max_chunk)
+        k_chunk = min(k_chunk, l1_max_chunk)
         return ttnn.SDPAProgramConfig(
             compute_with_storage_grid_size=(8, 8),
             exp_approx_mode=False,
