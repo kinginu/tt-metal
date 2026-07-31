@@ -229,42 +229,46 @@ inline void calculate_exponential_first_column() {
     }
 }
 
+// Fused softmax correction for the cross core flash decode reduction.
+//
+//   in  : dst0 = prev_max, dst1 = worker_max, dst2 = prev_sum, dst3 = worker_sum
+//   out : dst0 = exp((prev_max   - cur_max) * scale)
+//         dst1 = exp((worker_max - cur_max) * scale)
+//         dst2 = cur_sum = prev_sum * dst0 + worker_sum * dst1
+//         dst3 = cur_max = max(prev_max, worker_max)
+//
+// cur_max is written into the slot that worker_sum vacates, so the block never needs a fifth
+// DEST tile. That matters because fp32 dest accumulation leaves only four tiles in the default
+// half sync mode, and a fifth would be out of range and read back as garbage.
 inline void calculate_fused_max_sub_exp_add_tile(int scale_bf16) {
     constexpr int ITERATIONS_HALF_FACE = 4;
     constexpr uint32_t prev_max_base_idx = 0;
     constexpr uint32_t worker_max_base_idx = 32;
-    constexpr uint32_t cur_max_base_idx = 64;
-    constexpr uint32_t prev_sum_base_idx = 96;
-    constexpr uint32_t worker_sum_base_idx = 128;
+    constexpr uint32_t prev_sum_base_idx = 64;
+    constexpr uint32_t worker_sum_base_idx = 96;
 
     for (int d = 0; d < ITERATIONS_HALF_FACE; d++) {
-        sfpi::vFloat prev_max_vec = sfpi::dst_reg[prev_max_base_idx];
-        sfpi::vFloat worker_max_vec = sfpi::dst_reg[worker_max_base_idx];
-        sfpi::vFloat prev_sum_vec = sfpi::dst_reg[prev_sum_base_idx];
-        sfpi::vFloat worker_sum_vec = sfpi::dst_reg[worker_sum_base_idx];
-        v_if(prev_max_vec < worker_max_vec) { sfpi::dst_reg[cur_max_base_idx] = worker_max_vec; }
-        v_else { sfpi::dst_reg[cur_max_base_idx] = prev_max_vec; }
-        v_endif;
-        sfpi::vFloat cur_max = sfpi::dst_reg[cur_max_base_idx];
-
-        sfpi::vFloat diff_prev = prev_max_vec - cur_max;
-        sfpi::vFloat diff_worker = worker_max_vec - cur_max;
-
-        sfpi::vFloat exp_prev =
-            ckernel::sfpu::_ckernel_sfpu_exp_accurate_<true /*SCALE_EN*/, DST_ACCUM_MODE /*is_fp32_dest_acc_en*/>(
-                diff_prev, scale_bf16);
-        sfpi::vFloat exp_worker =
-            ckernel::sfpu::_ckernel_sfpu_exp_accurate_<true /*SCALE_EN*/, DST_ACCUM_MODE /*is_fp32_dest_acc_en*/>(
-                diff_worker, scale_bf16);
-
-        sfpi::dst_reg[prev_max_base_idx] = exp_prev;
-        sfpi::dst_reg[worker_max_base_idx] = exp_worker;
-
-        sfpi::dst_reg[worker_sum_base_idx] = exp_worker * worker_sum_vec;
-        sfpi::dst_reg[prev_sum_base_idx] = exp_prev * prev_sum_vec;
-        sfpi::vFloat corr_worker_sum = sfpi::dst_reg[worker_sum_base_idx];
-        sfpi::vFloat corr_prev_sum = sfpi::dst_reg[prev_sum_base_idx];
-        sfpi::dst_reg[prev_sum_base_idx] = corr_worker_sum + corr_prev_sum;
+        // Keep as few values live as possible: the sums are loaded only once the maxes are dead.
+        // Holding all four inputs plus the two exponentials at once overruns the SFPU register
+        // budget and sfpi fails to compile with "cannot store sfpu register".
+        sfpi::vFloat cur_max;
+        {
+            sfpi::vFloat prev_max_vec = sfpi::dst_reg[prev_max_base_idx];
+            sfpi::vFloat worker_max_vec = sfpi::dst_reg[worker_max_base_idx];
+            cur_max = prev_max_vec;
+            v_if(prev_max_vec < worker_max_vec) { cur_max = worker_max_vec; }
+            v_endif;
+            sfpi::dst_reg[prev_max_base_idx] =
+                ckernel::sfpu::_ckernel_sfpu_exp_accurate_<true /*SCALE_EN*/, DST_ACCUM_MODE>(
+                    prev_max_vec - cur_max, scale_bf16);
+            sfpi::dst_reg[worker_max_base_idx] =
+                ckernel::sfpu::_ckernel_sfpu_exp_accurate_<true /*SCALE_EN*/, DST_ACCUM_MODE>(
+                    worker_max_vec - cur_max, scale_bf16);
+        }
+        sfpi::vFloat cur_sum = sfpi::dst_reg[worker_max_base_idx] * sfpi::dst_reg[worker_sum_base_idx];
+        sfpi::dst_reg[worker_sum_base_idx] = cur_max;
+        sfpi::dst_reg[prev_sum_base_idx] =
+            sfpi::dst_reg[prev_max_base_idx] * sfpi::dst_reg[prev_sum_base_idx] + cur_sum;
         sfpi::dst_reg += 2;
     }
 }
