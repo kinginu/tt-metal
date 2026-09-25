@@ -37,7 +37,9 @@ void kernel_main() {
 
     const Noc noc;
     DataflowBuffer dfb_in0(dfb_id_in0);
-    DataflowBuffer dfb_in1(dfb_id_in1);
+#if !(GENERATE_INDICES && INDEX_TILES_ON_COMPUTE)
+    DataflowBuffer dfb_in1(dfb_id_in1);  // absent when the compute kernel builds the index tiles in DEST
+#endif
     const uint32_t tile_bytes_in0 = dfb_in0.get_entry_size();
 
 #if not GENERATE_INDICES
@@ -61,6 +63,7 @@ void kernel_main() {
 #endif
             dfb_in0.push_back(onetile);
 #if GENERATE_INDICES
+#if !INDEX_TILES_ON_COMPUTE
             // Generate corresponding index tile for position tracking during sort
             if (is32_bit_data) {
                 dataflow_kernel_lib::generate_index_tile<uint32_t>(
@@ -69,6 +72,7 @@ void kernel_main() {
                 dataflow_kernel_lib::generate_index_tile<uint16_t>(
                     dfb_id_in1, j);  // Generate indices for width position j
             }
+#endif  // !INDEX_TILES_ON_COMPUTE: otherwise the compute kernel builds the index tile in DEST
 #else
             // Read precomputed indices to circular buffer
             dfb_in1.reserve_back(onetile);
