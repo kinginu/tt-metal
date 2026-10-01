@@ -138,8 +138,8 @@ template <bool APPROXIMATION_MODE, bool is_fp32_dest_acc_en>
 inline void calculate_topk_canonicalize_negzero() {}
 
 // The DEST-built index tile is BH/WH-only; on Quasar the reader still generates the index tiles.
-template <bool APPROXIMATION_MODE, bool is_fp32_dest_acc_en>
-inline void calculate_topk_fill_index_tile(std::uint32_t /*dst_tile_index*/, std::uint32_t /*w*/) {}
+template <bool APPROXIMATION_MODE, bool is_fp32_dest_acc_en, std::uint32_t first_tile, std::uint32_t num_tiles>
+inline void calculate_topk_fill_index_tiles(std::uint32_t /*w*/) {}
 
 // Load 8 lanes (one value LREG pair + one index LREG pair) from Dest at runtime offsets.
 // Values land in LREG0,1; indices (offset by dst_indices_offset = 128) land in LREG4,5.
