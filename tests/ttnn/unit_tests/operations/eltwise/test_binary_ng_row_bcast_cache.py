@@ -2,8 +2,9 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-# Row broadcast of a [.., 1, W] operand B: with nothing sharded the reader walks C in column groups and holds B in L1.
-# Each result must match the same op with B expanded to A's shape.
+# Row broadcast of a [.., 1, W] operand: with nothing sharded the reader walks C in column groups and holds the
+# broadcast operand in L1. Each result must match the same op with that operand expanded to the other's shape.
+# Both operand orders run, because the reader holds whichever side is the broadcast one.
 
 import pytest
 import torch
@@ -47,8 +48,12 @@ def check(device, op, a_shape, b_shape, dtype, torch_dtype, a_memory_config=ttnn
     a = random(a_shape, torch_dtype)
     b = random(b_shape, torch_dtype)
     a_tt = to_device(a, dtype, device, a_memory_config)
-    out = op(a_tt, to_device(b, dtype, device))
-    expanded = op(a_tt, to_device(b.expand(a_shape).contiguous(), dtype, device))
+    b_tt = to_device(b, dtype, device)
+    out = op(a_tt, b_tt)
+    if a_shape[-2] == 1 and b_shape[-2] != 1:
+        expanded = op(to_device(a.expand(b_shape).contiguous(), dtype, device, a_memory_config), b_tt)
+    else:
+        expanded = op(a_tt, to_device(b.expand(a_shape).contiguous(), dtype, device))
     assert torch.equal(ttnn.to_torch(out), ttnn.to_torch(expanded))
 
 
@@ -59,6 +64,20 @@ def test_row_bcast_matches_expanded(device, dtype_name, op_name, shape_name):
     dtype, torch_dtype = DTYPES[dtype_name]
     a_shape, b_shape = SHAPES[shape_name]
     check(device, OPS[op_name], a_shape, b_shape, dtype, torch_dtype)
+
+
+# The broadcast operand first, so the reader holds A and the other operand's page carries the tile row. subtract is
+# here because it is not commutative, so a swapped operand order cannot pass.
+FIRST_OPERAND_OPS = {"mul": ttnn.multiply, "add": ttnn.add, "sub": ttnn.subtract}
+
+
+@pytest.mark.parametrize("shape_name", list(SHAPES))
+@pytest.mark.parametrize("op_name", list(FIRST_OPERAND_OPS))
+@pytest.mark.parametrize("dtype_name", list(DTYPES))
+def test_row_bcast_first_operand_matches_expanded(device, dtype_name, op_name, shape_name):
+    dtype, torch_dtype = DTYPES[dtype_name]
+    other_shape, row_shape = SHAPES[shape_name]
+    check(device, FIRST_OPERAND_OPS[op_name], row_shape, other_shape, dtype, torch_dtype)
 
 
 # The program hash excludes the shape, so one cached program serves rows narrower and wider than the cache.
@@ -90,6 +109,19 @@ def test_row_bcast_walk_transitions_on_cache_hits(device, dtype_name):
     device.enable_program_cache()
     for i, a_shape in enumerate(WALKS):
         check(device, ttnn.multiply, a_shape, [1, 1, 1, a_shape[-1]], dtype, torch_dtype)
+        if i == 0:
+            entries = device.num_program_cache_entries()
+            assert entries > 0, "The initial calls must populate the program cache"
+        assert device.num_program_cache_entries() == entries, "Walk transitions must reuse existing programs"
+
+
+@pytest.mark.parametrize("dtype_name", ["bf16", "fp32", "bfp8"])
+def test_row_bcast_first_operand_walk_transitions_on_cache_hits(device, dtype_name):
+    dtype, torch_dtype = DTYPES[dtype_name]
+    device.disable_and_clear_program_cache()
+    device.enable_program_cache()
+    for i, other_shape in enumerate(WALKS):
+        check(device, ttnn.subtract, [1, 1, 1, other_shape[-1]], other_shape, dtype, torch_dtype)
         if i == 0:
             entries = device.num_program_cache_entries()
             assert entries > 0, "The initial calls must populate the program cache"

@@ -8,7 +8,7 @@
 #include "api/dataflow/noc.h"
 #include "api/dataflow/dataflow_buffer.h"
 #include "api/tensor/noc_traits.h"
-#if COL_GROUP_B
+#if COL_GROUP
 #include "ttnn/operations/eltwise/binary_ng/device/kernels_ng/dataflow/col_group_walk.hpp"
 #endif
 
@@ -57,7 +57,7 @@ void kernel_main() {
     uint32_t start_tw = offset_c % Wt;
     uint32_t end_tw = has_sharding ? start_tw + dst_shard_width : Wt;
 
-#if COL_GROUP_B
+#if COL_GROUP
     // Same column-group order as the reader; 0 = page order.
     const uint32_t group = get_arg_val<uint32_t>(10);
     if (group != 0) {

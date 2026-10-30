@@ -343,6 +343,8 @@ bool hits_bh_col_bcast_bf16_to_fp32_hang(
 constexpr uint32_t kMaxColGroup = 4;
 constexpr uint32_t kColGroupMinTiles = 128;
 constexpr uint32_t kColGroupFewBanksMinTiles = 48;
+// Tiles per row from which a one-column walk is slower than the page-order loop on Wormhole.
+constexpr uint32_t kOneColumnMaxWt = 128;
 
 bool is_llk_bcast(
     const tt::ARCH arch,
@@ -675,15 +677,30 @@ void for_each_core_runtime_args(
 
     // Row broadcast column group: 1 for small shares, kMaxColGroup for large; 0 = page order.
     const uint32_t col_group = [&] {
+        const auto bcast_type = operation_attributes.subtile_broadcast_type;
+        const bool bcast_a = bcast_type == SubtileBroadcastType::ROW_A;
         if (!b.has_value() || row_major_inputs || rt_has_sharding || cHt < 2 ||
-            operation_attributes.subtile_broadcast_type != SubtileBroadcastType::ROW_B) {
+            (!bcast_a && bcast_type != SubtileBroadcastType::ROW_B)) {
             return 0u;
         }
         const uint32_t tiles_per_core = tt::div_up(rt_c_num_tiles, std::max(num_cores, 1u));
         const uint32_t dram_banks = a.device()->allocator()->get_num_banks(tt::tt_metal::BufferType::DRAM);
         const uint32_t min_tiles = std::gcd(cWt, dram_banks) > 1 ? CMAKE_UNIQUE_NAMESPACE::kColGroupFewBanksMinTiles
                                                                  : CMAKE_UNIQUE_NAMESPACE::kColGroupMinTiles;
-        return tiles_per_core >= min_tiles ? CMAKE_UNIQUE_NAMESPACE::kMaxColGroup : 1u;
+        if (tiles_per_core >= min_tiles) {
+            return CMAKE_UNIQUE_NAMESPACE::kMaxColGroup;
+        }
+        // One column at a time, which streams the other operand a row stride apart. On Wormhole that costs
+        // more than the re-reads it saves once a row is wide: against the page-order loop at 2048 output
+        // tiles it measures 1.12x at 128 tiles per row, 1.80x at 256 and 1.30x at 512, where up to 64 tiles
+        // per row it is 0.58x to 0.71x. Blackhole is 0.72x to 0.86x at every width. Operand B keeps this
+        // walk at every width, because that is what ships; operand A takes it only where it is measured to
+        // win, so nothing regresses.
+        if (bcast_a && a.device()->arch() == tt::ARCH::WORMHOLE_B0 &&
+            cWt >= CMAKE_UNIQUE_NAMESPACE::kOneColumnMaxWt) {
+            return 0u;
+        }
+        return 1u;
     }();
 
     // Noop cores get zero-filled runtime args, sized to match the active kernel variant so unused cores
@@ -1304,28 +1321,32 @@ tt::tt_metal::ProgramDescriptor BinaryNgDeviceOperation::ProgramFactory::create_
         writer_kernel = KernelName::WriterNoBcastNg;
     }
 
-    // Interleaved row broadcast: walk C in column groups and hold one B tile per column in L1 (c_7), so each B tile
-    // is read once per core. Flat 32x32 tiles hold only row 0 (two face rows); block-float tiles are held whole.
+    // Interleaved row broadcast: walk C in column groups and hold one broadcast tile per column in L1 (c_7), so each
+    // of them is read once per core. Flat 32x32 tiles hold only row 0 (two face rows); block-float tiles are held
+    // whole. Either operand can be the broadcast one, so everything here follows the broadcast side.
+    const bool bcast_is_a = operation_attributes.subtile_broadcast_type == SubtileBroadcastType::ROW_A;
     if (!inputs_row_major && !has_sharding && b.has_value() &&
-        operation_attributes.subtile_broadcast_type == SubtileBroadcastType::ROW_B) {
-        const auto& b_tile = b->tensor_spec().tile();
-        const bool b_flat = b_tile.get_height() == tt::constants::TILE_HEIGHT &&
-                            b_tile.get_width() == tt::constants::TILE_WIDTH &&
-                            (b_dtype == DataType::BFLOAT16 || b_dtype == DataType::FLOAT32 ||
-                             b_dtype == DataType::INT32 || b_dtype == DataType::UINT32);
-        const uint32_t row_bytes = 2 * 16 * (b_single_tile_size / tt::constants::TILE_HW);
-        const uint32_t slot_bytes = b_flat ? row_bytes : b_single_tile_size;
-        if (b_flat) {
-            reader_defines["B_ROW_WORDS"] = std::to_string(row_bytes / 2 / sizeof(uint32_t));
+        (bcast_is_a || operation_attributes.subtile_broadcast_type == SubtileBroadcastType::ROW_B)) {
+        const auto& bcast_tile = bcast_is_a ? a.tensor_spec().tile() : b->tensor_spec().tile();
+        const auto bcast_dtype = bcast_is_a ? a_dtype : b_dtype;
+        const uint32_t bcast_tile_size = bcast_is_a ? a_single_tile_size : b_single_tile_size;
+        const bool bcast_flat = bcast_tile.get_height() == tt::constants::TILE_HEIGHT &&
+                                bcast_tile.get_width() == tt::constants::TILE_WIDTH &&
+                                (bcast_dtype == DataType::BFLOAT16 || bcast_dtype == DataType::FLOAT32 ||
+                                 bcast_dtype == DataType::INT32 || bcast_dtype == DataType::UINT32);
+        const uint32_t row_bytes = 2 * 16 * (bcast_tile_size / tt::constants::TILE_HW);
+        const uint32_t slot_bytes = bcast_flat ? row_bytes : bcast_tile_size;
+        if (bcast_flat) {
+            reader_defines["BCAST_ROW_WORDS"] = std::to_string(row_bytes / 2 / sizeof(uint32_t));
         }
-        reader_defines["COL_GROUP_B"] = std::to_string(CMAKE_UNIQUE_NAMESPACE::kMaxColGroup);
-        writer_defines["COL_GROUP_B"] = std::to_string(CMAKE_UNIQUE_NAMESPACE::kMaxColGroup);
+        reader_defines["COL_GROUP"] = std::to_string(CMAKE_UNIQUE_NAMESPACE::kMaxColGroup);
+        writer_defines["COL_GROUP"] = std::to_string(CMAKE_UNIQUE_NAMESPACE::kMaxColGroup);
         desc.cbs.push_back(CBDescriptor{
             .total_size = slot_bytes * CMAKE_UNIQUE_NAMESPACE::kMaxColGroup,
             .core_ranges = all_device_cores,
             .format_descriptors = {{CBFormatDescriptor{
                 .buffer_index = static_cast<uint8_t>(tt::CBIndex::c_7),
-                .data_format = b_data_format,
+                .data_format = bcast_is_a ? a_data_format : b_data_format,
                 .page_size = slot_bytes,
             }}},
         });

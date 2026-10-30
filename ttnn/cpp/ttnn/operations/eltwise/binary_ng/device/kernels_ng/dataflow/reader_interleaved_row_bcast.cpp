@@ -11,15 +11,22 @@
 #include "api/tensor/noc_traits.h"
 #include "ttnn/operations/eltwise/binary_ng/device/kernels/dataflow/fill_tile_utils.hpp"
 
-#if COL_GROUP_B
+#if COL_GROUP
 #include <algorithm>
 
 #include "ttnn/operations/eltwise/binary_ng/device/kernels_ng/dataflow/col_group_walk.hpp"
+
+// Either operand can be the broadcast one, so the fill macro follows the broadcast side's dtype.
+#if SRC_BCAST
+#define FILL_BCAST_TILE_WITH_FIRST_ROW FILL_TILE_WITH_FIRST_ROW
+#else
+#define FILL_BCAST_TILE_WITH_FIRST_ROW FILL_TILE_WITH_FIRST_ROW_B
+#endif
 #endif
 
-#if B_ROW_WORDS
+#if BCAST_ROW_WORDS
 // Row 0 of a 32x32 tile: the first rows of faces 0 and 1, held back to back.
-constexpr uint32_t kRowBytes = B_ROW_WORDS * 4;
+constexpr uint32_t kRowBytes = BCAST_ROW_WORDS * 4;
 constexpr uint32_t kFaceBytes = 16 * kRowBytes;
 
 FORCE_INLINE void copy_row0(uint32_t dst, uint32_t dst_face, uint32_t src, uint32_t src_face) {
@@ -27,7 +34,7 @@ FORCE_INLINE void copy_row0(uint32_t dst, uint32_t dst_face, uint32_t src, uint3
     auto* d1 = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(dst + dst_face);
     auto* s0 = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(src);
     auto* s1 = reinterpret_cast<volatile tt_l1_ptr uint32_t*>(src + src_face);
-    for (uint32_t i = 0; i < B_ROW_WORDS; ++i) {
+    for (uint32_t i = 0; i < BCAST_ROW_WORDS; ++i) {
         d0[i] = s0[i];
         d1[i] = s1[i];
     }
@@ -121,15 +128,15 @@ void kernel_main() {
     uint32_t next_d_shift_b = d_stride_b - n_stride_b * N;
     uint32_t next_nd_shift_b = nD_stride_b - d_stride_b * D;
 
-#if COL_GROUP_B
-    // Column groups (0 = page order): each B tile is read once per column and held in c_7.
+#if COL_GROUP
+    // Column groups (0 = page order): each broadcast tile is read once per column and held in c_7.
     const uint32_t group = get_arg_val<uint32_t>(23);
     if (group != 0) {
-        CircularBuffer cb_held_b(tt::CBIndex::c_7);
-        cb_held_b.reserve_back(COL_GROUP_B);
-        const uint32_t held = cb_held_b.get_write_ptr();
-        uint32_t held_page[COL_GROUP_B];
-        std::fill_n(held_page, COL_GROUP_B, 0xFFFFFFFF);
+        CircularBuffer cb_held(tt::CBIndex::c_7);
+        cb_held.reserve_back(COL_GROUP);
+        const uint32_t held = cb_held.get_write_ptr();
+        uint32_t held_page[COL_GROUP];
+        std::fill_n(held_page, COL_GROUP, 0xFFFFFFFF);
         uint32_t channel = start_tile_id / HtWt;
         ColGroupWalk walk(start_tile_id % HtWt, Ht, Wt, group);
         uint32_t a_off = 0, b_off = 0;
@@ -139,46 +146,71 @@ void kernel_main() {
             b_off = ndd * nD_stride_b + dd * d_stride_b + nn * n_stride_b + cc * c_stride_b;
         };
         set_channel(channel);
+        // The broadcast operand's page is the column; the other operand's page carries the row as well.
+#if SRC_BCAST
+        auto& cb_bcast = cb_src;
+        auto& cb_other = cb_src_b;
+        const auto& src_bcast = src;
+        const auto& src_other = src_b;
+        const uint32_t bcast_tile_bytes = src_tile_bytes;
+        const uint32_t other_tile_bytes = src_tile_bytes_b;
+        const uint32_t* const bcast_off = &a_off;
+        const uint32_t* const other_off = &b_off;
+#else
+        auto& cb_bcast = cb_src_b;
+        auto& cb_other = cb_src;
+        const auto& src_bcast = src_b;
+        const auto& src_other = src;
+        const uint32_t bcast_tile_bytes = src_tile_bytes_b;
+        const uint32_t other_tile_bytes = src_tile_bytes;
+        const uint32_t* const bcast_off = &b_off;
+        const uint32_t* const other_off = &a_off;
+#endif
         for (uint32_t i = 0; i < dst_num_tiles; ++i) {
             const uint32_t tw = walk.tw();
-            const uint32_t b_page = b_off + tw;
-            const bool fetch = held_page[walk.k] != b_page;
-            held_page[walk.k] = b_page;
+            const uint32_t bcast_page = *bcast_off + tw;
+            const bool fetch = held_page[walk.k] != bcast_page;
+            held_page[walk.k] = bcast_page;
             cb_src.reserve_back(onetile);
             cb_src_b.reserve_back(onetile);
-            noc.async_read(src, cb_src, src_tile_bytes, {.page_id = a_off + walk.th * Wt + tw}, {.offset_bytes = 0});
-#if B_ROW_WORDS
-            // Restore row 0 from c_7 while A's read is in flight.
-            const uint32_t b_tile = cb_src_b.get_write_ptr();
+            noc.async_read(
+                src_other,
+                cb_other,
+                other_tile_bytes,
+                {.page_id = *other_off + walk.th * Wt + tw},
+                {.offset_bytes = 0});
+#if BCAST_ROW_WORDS
+            // Restore row 0 from c_7 while the other operand's read is in flight.
+            const uint32_t bcast_tile = cb_bcast.get_write_ptr();
             const uint32_t slot = held + walk.k * 2 * kRowBytes;
             if (fetch) {
-                noc.async_read(src_b, cb_src_b, src_tile_bytes_b, {.page_id = b_page}, {.offset_bytes = 0});
+                noc.async_read(src_bcast, cb_bcast, bcast_tile_bytes, {.page_id = bcast_page}, {.offset_bytes = 0});
             } else {
-                copy_row0(b_tile, kFaceBytes, slot, kRowBytes);
+                copy_row0(bcast_tile, kFaceBytes, slot, kRowBytes);
             }
             noc.async_read_barrier();
             if (fetch) {
-                copy_row0(slot, kRowBytes, b_tile, kFaceBytes);
+                copy_row0(slot, kRowBytes, bcast_tile, kFaceBytes);
             }
 #if !BCAST_LLK
-            FILL_TILE_WITH_FIRST_ROW_B(b_tile);
+            FILL_BCAST_TILE_WITH_FIRST_ROW(bcast_tile);
 #endif
 #else
             // Block float: hold the whole tile.
-            const uint32_t slot = held + walk.k * src_tile_bytes_b;
+            const uint32_t slot = held + walk.k * bcast_tile_bytes;
             if (fetch) {
                 noc.async_read(
-                    src_b,
-                    cb_held_b,
-                    src_tile_bytes_b,
-                    {.page_id = b_page},
-                    {.offset_bytes = walk.k * src_tile_bytes_b});
+                    src_bcast,
+                    cb_held,
+                    bcast_tile_bytes,
+                    {.page_id = bcast_page},
+                    {.offset_bytes = walk.k * bcast_tile_bytes});
                 noc.async_read_barrier();
 #if !BCAST_LLK
-                FILL_TILE_WITH_FIRST_ROW_B(slot);
+                FILL_BCAST_TILE_WITH_FIRST_ROW(slot);
 #endif
             }
-            noc.async_read(CoreLocalMem<uint32_t>(slot), cb_src_b, src_tile_bytes_b, {}, {});
+            noc.async_read(CoreLocalMem<uint32_t>(slot), cb_bcast, bcast_tile_bytes, {}, {});
             noc.async_read_barrier();
 #endif
             cb_src.push_back(onetile);
